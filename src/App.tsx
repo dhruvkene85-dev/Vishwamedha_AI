@@ -57,7 +57,7 @@ export default function App() {
       responseStyle: 'step_by_step',
       speechRate: 1.0,
       autoScroll: true,
-      modelIdentifier: 'gemini-3.7-flash',
+      modelIdentifier: 'meta/llama-3.2-11b-vision-instruct',
     };
   });
 
@@ -337,7 +337,7 @@ export default function App() {
     );
   };
 
-  // Main message sender with Gemini streaming & multimodal capability
+  // Main message sender with NVIDIA multimodal capability
   const handleSendMessage = async (text: string, images?: MessageImage[]) => {
     if (!text.trim() && (!images || images.length === 0)) return;
     
@@ -410,14 +410,14 @@ export default function App() {
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
 
-      const response = await fetch('/api/chat/stream', {
+      const response = await fetch('/api/nvidia-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: historyPayload,
           studentGrade: targetSession.studentGrade || userProfile.studentGrade || appSettings.defaultGrade,
           subjectFocus: targetSession.subjectFocus || userProfile.preferredSubject || appSettings.defaultSubject,
-          modelIdentifier: appSettings.modelIdentifier || 'gemini-3.7-flash',
+          model: 'meta/llama-3.2-11b-vision-instruct',
         }),
         signal: abortController.signal,
       });
@@ -433,74 +433,9 @@ export default function App() {
         throw new Error(errDetail);
       }
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let accumulatedText = '';
-
-      if (reader) {
-        let buffer = '';
-
-        const parseSSEBlock = (block: string) => {
-          const lines = block.split('\n');
-          for (const rawLine of lines) {
-            const trimmed = rawLine.trim();
-            if (trimmed.startsWith('data:')) {
-              const payload = trimmed.replace(/^data:\s*/, '');
-              if (!payload || payload === '[DONE]') continue;
-              try {
-                const data = JSON.parse(payload);
-                if (data.text) {
-                  accumulatedText += data.text;
-                  const currentText = accumulatedText;
-                  setSessions((prev) =>
-                    prev.map((s) => {
-                      if (s.id !== targetSession.id) return s;
-                      return {
-                        ...s,
-                        messages: s.messages.map((m) =>
-                          m.id === assistantMessageId
-                            ? { ...m, content: currentText, isStreaming: true, isError: false }
-                            : m
-                        ),
-                      };
-                    })
-                  );
-                }
-                if (data.error) {
-                  throw new Error(data.error);
-                }
-              } catch (parseError: any) {
-                if (payload.includes('"error"')) {
-                  try {
-                    const parsed = JSON.parse(payload);
-                    if (parsed.error) throw new Error(parsed.error);
-                  } catch {
-                    // continue
-                  }
-                }
-              }
-            }
-          }
-        };
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            if (buffer.trim()) {
-              parseSSEBlock(buffer);
-            }
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split('\n\n');
-          buffer = parts.pop() || '';
-
-          for (const part of parts) {
-            parseSSEBlock(part);
-          }
-        }
-      }
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      const accumulatedText = data.content || '';
 
       // Mark generation complete
       setSessions((prev) =>

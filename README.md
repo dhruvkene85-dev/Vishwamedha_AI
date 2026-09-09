@@ -15,6 +15,8 @@ View your app in AI Studio: https://ai.studio/apps/b30a9495-e3d8-46d5-bbe7-32dcc
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Copy [.env.example](.env.example) to `.env` and set `NVIDIA_API_KEY` to your NVIDIA API key
 3. Run the app:
    `npm run dev`
+
+For Vercel, add `NVIDIA_API_KEY` in the project Environment Variables and redeploy. `.env` is intentionally ignored by git and is not uploaded to Vercel.

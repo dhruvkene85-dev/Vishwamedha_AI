@@ -1,4 +1,7 @@
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
+import { DatabaseSync } from "node:sqlite";
 import { UserProfile, StudentGrade, SubjectFocus, ChatSession } from "../types";
 
 export interface StoredUser {
@@ -17,42 +20,150 @@ export interface StoredUser {
   lastLoginAt: number;
 }
 
-// In-memory persistent database for users, sessions, and user chat conversations
+interface UserRow {
+  userId: string;
+  email: string;
+  passwordHash: string | null;
+  salt: string | null;
+  displayName: string;
+  photoURL: string | null;
+  studentGrade: string;
+  preferredSubject: string;
+  learningGoals: string | null;
+  customInstructions: string | null;
+  authProvider: string;
+  createdAt: number;
+  lastLoginAt: number;
+}
+
+interface ChatRow {
+  id: string;
+  userId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: string;
+  studentGrade: string;
+  subjectFocus: string;
+}
+
+const DB_PATH = path.join(process.cwd(), "data", "vishwamedha.sqlite");
+
 class AuthStore {
-  private users: Map<string, StoredUser> = new Map(); // email -> StoredUser
-  private usersById: Map<string, StoredUser> = new Map(); // userId -> StoredUser
-  private sessions: Map<string, string> = new Map(); // sessionToken -> userId
-  private userChatSessions: Map<string, ChatSession[]> = new Map(); // userId -> ChatSession[]
+  private db: DatabaseSync;
 
   constructor() {
-    // Seed default student account if not present
+    const dir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    this.db = new DatabaseSync(DB_PATH);
+    this.initializeSchema();
     this.seedDefaultUser();
+  }
+
+  private initializeSchema() {
+    this.db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS users (
+        userId TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        passwordHash TEXT,
+        salt TEXT,
+        displayName TEXT NOT NULL,
+        photoURL TEXT,
+        studentGrade TEXT NOT NULL,
+        preferredSubject TEXT NOT NULL,
+        learningGoals TEXT,
+        customInstructions TEXT,
+        authProvider TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        lastLoginAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_sessions (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        title TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        messages TEXT NOT NULL,
+        studentGrade TEXT NOT NULL,
+        subjectFocus TEXT NOT NULL
+      );
+    `);
+  }
+
+  private mapRowToUser(row: UserRow): StoredUser {
+    return {
+      userId: row.userId,
+      email: row.email,
+      passwordHash: row.passwordHash ?? undefined,
+      salt: row.salt ?? undefined,
+      displayName: row.displayName,
+      photoURL: row.photoURL ?? undefined,
+      studentGrade: row.studentGrade as StudentGrade,
+      preferredSubject: row.preferredSubject as SubjectFocus,
+      learningGoals: row.learningGoals ?? undefined,
+      customInstructions: row.customInstructions ?? undefined,
+      authProvider: row.authProvider as "password" | "google",
+      createdAt: Number(row.createdAt),
+      lastLoginAt: Number(row.lastLoginAt),
+    };
+  }
+
+  private mapRowToChatSession(row: ChatRow): ChatSession {
+    return {
+      id: row.id,
+      title: row.title,
+      createdAt: Number(row.createdAt),
+      updatedAt: Number(row.updatedAt),
+      messages: JSON.parse(row.messages) as ChatSession["messages"],
+      studentGrade: row.studentGrade as StudentGrade,
+      subjectFocus: row.subjectFocus as SubjectFocus,
+    };
   }
 
   private seedDefaultUser() {
     const defaultEmail = "kalpnaneware1@gmail.com";
+    const existing = this.findUserByEmail(defaultEmail);
+    if (existing) {
+      return;
+    }
+
     const userId = "usr_demo_kalpna_001";
     const salt = crypto.randomBytes(16).toString("hex");
     const passwordHash = this.hashPassword("student123", salt);
 
-    const defaultUser: StoredUser = {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO users (
+        userId, email, passwordHash, salt, displayName, photoURL,
+        studentGrade, preferredSubject, learningGoals, customInstructions,
+        authProvider, createdAt, lastLoginAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
       userId,
-      email: defaultEmail,
+      defaultEmail,
       passwordHash,
       salt,
-      displayName: "Kalpna Neware",
-      photoURL: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
-      studentGrade: "high_school",
-      preferredSubject: "mathematics",
-      learningGoals: "Master competitive exams, advanced calculus, and physics concepts.",
-      customInstructions: "Provide step-by-step rigorous workings with formulas highlighted.",
-      authProvider: "google",
-      createdAt: Date.now() - 86400000 * 7,
-      lastLoginAt: Date.now(),
-    };
-
-    this.users.set(defaultEmail.toLowerCase(), defaultUser);
-    this.usersById.set(userId, defaultUser);
+      "Kalpna Neware",
+      "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
+      "high_school",
+      "mathematics",
+      "Master competitive exams, advanced calculus, and physics concepts.",
+      "Provide step-by-step rigorous workings with formulas highlighted.",
+      "google",
+      now - 86400000 * 7,
+      now
+    );
   }
 
   public hashPassword(password: string, salt: string): string {
@@ -72,30 +183,32 @@ class AuthStore {
 
   public createSessionToken(userId: string): string {
     const token = "vishwamedha_tok_" + crypto.randomBytes(32).toString("hex");
-    this.sessions.set(token, userId);
+    this.db.prepare(`INSERT INTO sessions (token, userId, createdAt) VALUES (?, ?, ?)`)
+      .run(token, userId, Date.now());
     return token;
   }
 
   public getUserByToken(token?: string): StoredUser | null {
     if (!token) return null;
     const cleanToken = token.replace(/^Bearer\s+/i, "").trim();
-    const userId = this.sessions.get(cleanToken);
-    if (!userId) return null;
-    return this.usersById.get(userId) || null;
+    const row = this.db.prepare(`SELECT u.* FROM sessions s JOIN users u ON u.userId = s.userId WHERE s.token = ?`).get(cleanToken) as UserRow | undefined;
+    return row ? this.mapRowToUser(row) : null;
   }
 
   public removeSessionToken(token?: string): void {
     if (!token) return;
     const cleanToken = token.replace(/^Bearer\s+/i, "").trim();
-    this.sessions.delete(cleanToken);
+    this.db.prepare(`DELETE FROM sessions WHERE token = ?`).run(cleanToken);
   }
 
   public findUserByEmail(email: string): StoredUser | null {
-    return this.users.get(email.toLowerCase().trim()) || null;
+    const row = this.db.prepare(`SELECT * FROM users WHERE email = ?`).get(email.toLowerCase().trim()) as UserRow | undefined;
+    return row ? this.mapRowToUser(row) : null;
   }
 
   public findUserById(userId: string): StoredUser | null {
-    return this.usersById.get(userId) || null;
+    const row = this.db.prepare(`SELECT * FROM users WHERE userId = ?`).get(userId) as UserRow | undefined;
+    return row ? this.mapRowToUser(row) : null;
   }
 
   public registerUser(params: {
@@ -108,13 +221,14 @@ class AuthStore {
     authProvider?: "password" | "google";
   }): { user: UserProfile; token: string } {
     const normalizedEmail = params.email.toLowerCase().trim();
-    if (this.users.has(normalizedEmail)) {
+    if (this.findUserByEmail(normalizedEmail)) {
       throw new Error("An account with this email address already exists. Please sign in.");
     }
 
     const userId = "usr_" + crypto.randomBytes(8).toString("hex");
     const salt = crypto.randomBytes(16).toString("hex");
     const passwordHash = params.password ? this.hashPassword(params.password, salt) : undefined;
+    const now = Date.now();
 
     const storedUser: StoredUser = {
       userId,
@@ -128,23 +242,39 @@ class AuthStore {
       learningGoals: "Excel in conceptual problem solving and scientific reasoning.",
       customInstructions: "Provide clear, methodical step-by-step explanations.",
       authProvider: params.authProvider || "password",
-      createdAt: Date.now(),
-      lastLoginAt: Date.now(),
+      createdAt: now,
+      lastLoginAt: now,
     };
 
-    this.users.set(normalizedEmail, storedUser);
-    this.usersById.set(userId, storedUser);
+    this.db.prepare(`
+      INSERT INTO users (
+        userId, email, passwordHash, salt, displayName, photoURL,
+        studentGrade, preferredSubject, learningGoals, customInstructions,
+        authProvider, createdAt, lastLoginAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      storedUser.userId,
+      storedUser.email,
+      storedUser.passwordHash ?? null,
+      storedUser.salt ?? null,
+      storedUser.displayName,
+      storedUser.photoURL ?? null,
+      storedUser.studentGrade,
+      storedUser.preferredSubject,
+      storedUser.learningGoals ?? null,
+      storedUser.customInstructions ?? null,
+      storedUser.authProvider,
+      storedUser.createdAt,
+      storedUser.lastLoginAt
+    );
 
     const token = this.createSessionToken(userId);
-    return {
-      user: this.toPublicProfile(storedUser),
-      token,
-    };
+    return { user: this.toPublicProfile(storedUser), token };
   }
 
   public loginUser(email: string, password: string): { user: UserProfile; token: string } {
     const normalizedEmail = email.toLowerCase().trim();
-    const user = this.users.get(normalizedEmail);
+    const user = this.findUserByEmail(normalizedEmail);
 
     if (!user) {
       throw new Error("No account found with this email address. Please sign up.");
@@ -162,13 +292,9 @@ class AuthStore {
       throw new Error("Incorrect password. Please try again.");
     }
 
-    user.lastLoginAt = Date.now();
+    this.db.prepare(`UPDATE users SET lastLoginAt = ? WHERE userId = ?`).run(Date.now(), user.userId);
     const token = this.createSessionToken(user.userId);
-
-    return {
-      user: this.toPublicProfile(user),
-      token,
-    };
+    return { user: this.toPublicProfile(user), token };
   }
 
   public googleSignIn(params: {
@@ -179,7 +305,8 @@ class AuthStore {
     preferredSubject?: SubjectFocus;
   }): { user: UserProfile; token: string } {
     const normalizedEmail = params.email.toLowerCase().trim();
-    let user = this.users.get(normalizedEmail);
+    let user = this.findUserByEmail(normalizedEmail);
+    const now = Date.now();
 
     if (!user) {
       const userId = "usr_g_" + crypto.randomBytes(8).toString("hex");
@@ -193,45 +320,93 @@ class AuthStore {
         learningGoals: "Master high-school & college STEM concepts with Vishwamedha AI.",
         customInstructions: "Provide clear, rigorous proofs and formulas.",
         authProvider: "google",
-        createdAt: Date.now(),
-        lastLoginAt: Date.now(),
+        createdAt: now,
+        lastLoginAt: now,
       };
-      this.users.set(normalizedEmail, user);
-      this.usersById.set(userId, user);
+
+      this.db.prepare(`
+        INSERT INTO users (
+          userId, email, passwordHash, salt, displayName, photoURL,
+          studentGrade, preferredSubject, learningGoals, customInstructions,
+          authProvider, createdAt, lastLoginAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        user.userId,
+        user.email,
+        null,
+        null,
+        user.displayName,
+        user.photoURL ?? null,
+        user.studentGrade,
+        user.preferredSubject,
+        user.learningGoals ?? null,
+        user.customInstructions ?? null,
+        user.authProvider,
+        user.createdAt,
+        user.lastLoginAt
+      );
     } else {
-      user.lastLoginAt = Date.now();
+      const updates: string[] = ["lastLoginAt = ?"];
+      const values: any[] = [now, user.userId];
+
       if (params.photoURL && (!user.photoURL || user.photoURL.includes("dicebear"))) {
-        user.photoURL = params.photoURL;
+        updates.push("photoURL = ?");
+        values.splice(1, 0, params.photoURL);
       }
       if (params.displayName && user.displayName.includes("Scholar")) {
-        user.displayName = params.displayName;
+        updates.push("displayName = ?");
+        values.splice(1, 0, params.displayName);
       }
+
+      const query = `UPDATE users SET ${updates.join(", ")} WHERE userId = ?`;
+      this.db.prepare(query).run(...values);
+      user = this.findUserById(user.userId)!;
     }
 
     const token = this.createSessionToken(user.userId);
-    return {
-      user: this.toPublicProfile(user),
-      token,
-    };
+    return { user: this.toPublicProfile(user), token };
   }
 
-  public updateProfile(
-    userId: string,
-    updates: Partial<UserProfile>
-  ): UserProfile {
-    const user = this.usersById.get(userId);
+  public updateProfile(userId: string, updates: Partial<UserProfile>): UserProfile {
+    const user = this.findUserById(userId);
     if (!user) {
       throw new Error("User not found.");
     }
 
-    if (updates.displayName) user.displayName = updates.displayName.trim();
-    if (updates.studentGrade) user.studentGrade = updates.studentGrade;
-    if (updates.preferredSubject) user.preferredSubject = updates.preferredSubject;
-    if (updates.learningGoals !== undefined) user.learningGoals = updates.learningGoals;
-    if (updates.customInstructions !== undefined) user.customInstructions = updates.customInstructions;
-    if (updates.photoURL) user.photoURL = updates.photoURL;
+    const fields: string[] = [];
+    const values: any[] = [];
 
-    return this.toPublicProfile(user);
+    if (updates.displayName) {
+      fields.push("displayName = ?");
+      values.push(updates.displayName.trim());
+    }
+    if (updates.studentGrade) {
+      fields.push("studentGrade = ?");
+      values.push(updates.studentGrade);
+    }
+    if (updates.preferredSubject) {
+      fields.push("preferredSubject = ?");
+      values.push(updates.preferredSubject);
+    }
+    if (updates.learningGoals !== undefined) {
+      fields.push("learningGoals = ?");
+      values.push(updates.learningGoals ?? null);
+    }
+    if (updates.customInstructions !== undefined) {
+      fields.push("customInstructions = ?");
+      values.push(updates.customInstructions ?? null);
+    }
+    if (updates.photoURL) {
+      fields.push("photoURL = ?");
+      values.push(updates.photoURL);
+    }
+
+    if (fields.length > 0) {
+      const query = `UPDATE users SET ${fields.join(", ")} WHERE userId = ?`;
+      this.db.prepare(query).run(...values, userId);
+    }
+
+    return this.toPublicProfile(this.findUserById(userId)!);
   }
 
   public toPublicProfile(user: StoredUser): UserProfile {
@@ -250,13 +425,31 @@ class AuthStore {
     };
   }
 
-  // Conversation session isolation per user
   public getUserSessions(userId: string): ChatSession[] {
-    return this.userChatSessions.get(userId) || [];
+    const rows = this.db.prepare(`SELECT * FROM chat_sessions WHERE userId = ? ORDER BY updatedAt DESC`).all(userId) as ChatRow[];
+    return rows.map((row) => this.mapRowToChatSession(row));
   }
 
   public saveUserSessions(userId: string, sessions: ChatSession[]): void {
-    this.userChatSessions.set(userId, sessions);
+    this.db.prepare(`DELETE FROM chat_sessions WHERE userId = ?`).run(userId);
+
+    const stmt = this.db.prepare(`
+      INSERT INTO chat_sessions (id, userId, title, createdAt, updatedAt, messages, studentGrade, subjectFocus)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const session of sessions) {
+      stmt.run(
+        session.id,
+        userId,
+        session.title,
+        session.createdAt,
+        session.updatedAt,
+        JSON.stringify(session.messages),
+        session.studentGrade,
+        session.subjectFocus
+      );
+    }
   }
 }
 

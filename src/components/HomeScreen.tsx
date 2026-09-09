@@ -172,7 +172,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
           <div className="bg-white/5 rounded-xl p-3 border border-white/5">
             <div className="text-[11px] text-slate-400 font-medium">Active Engine</div>
-            <div className="text-sm font-bold text-amber-300 mt-0.5 truncate">Gemini 3.7 Flash</div>
+            <div className="text-sm font-bold text-amber-300 mt-0.5 truncate">Meta Muse Glimmer 30B</div>
           </div>
         </div>
       </div>

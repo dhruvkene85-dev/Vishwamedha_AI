@@ -125,7 +125,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             </h2>
           </div>
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-            Active: {settings.modelIdentifier || 'gemini-3.7-flash'}
+            Active: {settings.modelIdentifier || 'meta/llama-3.2-11b-vision-instruct'}
           </span>
         </div>
 
@@ -135,25 +135,22 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             <div>
               <div className="font-bold text-slate-900 flex items-center gap-1.5 text-sm">
                 <Sparkles className="w-4 h-4 text-indigo-600" />
-                <span>Primary Gemini Model</span>
+                <span>Primary NVIDIA Model</span>
               </div>
               <p className="text-slate-500 text-[11px] mt-0.5">
-                Select the primary Google Gemini model used for generation.
+                Select the NVIDIA model used for generation.
               </p>
             </div>
 
             <select
-              value={settings.modelIdentifier || 'gemini-3.7-flash'}
+              value={settings.modelIdentifier || 'meta/llama-3.2-11b-vision-instruct'}
               onChange={(e) => {
                 onUpdateSettings({ ...settings, modelIdentifier: e.target.value });
                 showSuccess(`Model updated to ${e.target.value}`);
               }}
               className="bg-white px-3 py-2 border border-indigo-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs cursor-pointer"
             >
-              <option value="gemini-3.7-flash">Gemini 3.7 Flash (Recommended)</option>
-              <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Ultra Fast)</option>
-              <option value="gemini-3-flash-preview">Gemini 3.0 Flash Preview</option>
-              <option value="gemini-flash-latest">Gemini Flash Latest (Auto-Updated)</option>
+              <option value="meta/llama-3.2-11b-vision-instruct">Meta Llama 3.2 11B Vision Instruct</option>
             </select>
           </div>
 

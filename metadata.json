@@ -2,5 +2,5 @@
   "name": "Vishwamedha AI",
   "description": "A highly capable, general-purpose conversational AI assistant and tutor. Intelligence Without Boundaries.",
   "requestFramePermissions": ["microphone"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_NVIDIA_API"]
 }

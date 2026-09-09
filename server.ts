@@ -1,6 +1,6 @@
 import express from "express";
 import path from "path";
-import { GoogleGenAI } from "@google/genai";
+import OpenAI from "openai";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { authStore } from "./src/server/authStore";
@@ -10,20 +10,15 @@ dotenv.config({ path: ".env.local", override: true });
 
 const app = express();
 const PORT = 3000;
+const NVIDIA_MODEL = (process.env.NVIDIA_MODEL || "meta/llama-3.2-11b-vision-instruct").trim();
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Helper to retrieve dynamic Gemini Client with active API key
-function getGeminiClient() {
-  const apiKey = process.env.GEMINI_API_KEY || "";
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      }
-    }
+function getNvidiaClient() {
+  return new OpenAI({
+    apiKey: (process.env.NVIDIA_API_KEY || "").trim(),
+    baseURL: "https://integrate.api.nvidia.com/v1",
   });
 }
 
@@ -63,14 +58,6 @@ IMAGE UNDERSTANDING:
 
 SPEED & DIRECTNESS:
 - Deliver prompt, high-quality, clear answers immediately.`;
-
-// Model Candidates in priority order from official @google/genai specification
-const MODEL_CANDIDATES = [
-  "gemini-3.7-flash",
-  "gemini-3.1-flash-lite",
-  "gemini-3-flash-preview",
-  "gemini-flash-latest",
-];
 
 // Live exchange rate cache (refreshed every 30 minutes)
 interface ExchangeRateCache {
@@ -133,6 +120,15 @@ function cleanErrorMessage(err: any): string {
   return msg;
 }
 
+function getNvidiaError(error: any): { status: number; message: string } {
+  const status = Number(error?.status) || Number(error?.response?.status) || 502;
+  const providerError = error?.error || error?.response?.data?.error || error?.response?.data;
+  const message = typeof providerError === "string"
+    ? providerError
+    : providerError?.message || error?.message || "NVIDIA API request failed.";
+  return { status: status >= 400 && status < 600 ? status : 502, message: cleanErrorMessage(message) };
+}
+
 interface InputMessage {
   role: string;
   content?: string;
@@ -140,8 +136,20 @@ interface InputMessage {
   isError?: boolean;
 }
 
+function toNvidiaMessages(contents: Array<{ role: "user" | "model"; parts: any[] }>, systemInstruction: string) {
+  return [
+    { role: "system", content: systemInstruction },
+    ...contents.map((content) => ({
+      role: content.role === "model" ? "assistant" : "user",
+      content: content.parts.map((part: any) => part.text
+        ? { type: "text", text: part.text }
+        : { type: "image_url", image_url: { url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}` } }),
+    })),
+  ] as OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+}
+
 /**
- * Formats and validates the message history for the Gemini API:
+ * Formats and validates the message history for the NVIDIA API:
  * - Prunes excessive ancient history to keep requests lightning fast
  * - Filters empty / error turns
  * - Extracts clean base64 data & MIME types for images
@@ -149,7 +157,7 @@ interface InputMessage {
  * - Merges consecutive same-role turns to avoid 400 Bad Request
  * - Preserves multimodal images for active questions
  */
-function formatContentsForGemini(messages: InputMessage[]) {
+function formatContentsForNvidia(messages: InputMessage[]) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return [];
   }
@@ -248,7 +256,59 @@ function formatContentsForGemini(messages: InputMessage[]) {
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", name: "Vishwamedha AI", ready: !!process.env.GEMINI_API_KEY });
+  res.json({ status: "ok", name: "Vishwamedha AI", ready: !!process.env.NVIDIA_API_KEY });
+});
+
+// NVIDIA OpenAI-compatible chat endpoint
+app.post("/api/nvidia-chat", async (req, res) => {
+  try {
+    const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
+    if (!apiKey || apiKey === "YOUR_NVIDIA_API_KEY_HERE") {
+      return res.status(500).json({ error: "NVIDIA_API_KEY is not configured in the server environment." });
+    }
+
+    const messages = req.body?.messages;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "Messages array is required." });
+    }
+
+    const nvidiaMessages = messages.map((message: any) => {
+      const content: any[] = [];
+      if (message.content?.trim()) {
+        content.push({ type: "text", text: message.content.trim() });
+      }
+      for (const image of message.images || []) {
+        if (image.data) {
+          content.push({
+            type: "image_url",
+            image_url: { url: image.data },
+          });
+        }
+      }
+      return {
+        role: message.role === "user" ? "user" : "assistant",
+        content: content.length === 1 && content[0].type === "text" ? content[0].text : content,
+      };
+    });
+
+    const completion = await getNvidiaClient().chat.completions.create({
+      model: NVIDIA_MODEL,
+      messages: nvidiaMessages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+      temperature: 1,
+      top_p: 0.95,
+      max_tokens: 8192,
+      stream: false,
+    });
+
+    res.json({
+      content: completion.choices[0]?.message?.content || "",
+      response: completion,
+    });
+  } catch (error: any) {
+    const providerError = getNvidiaError(error);
+    console.error(`NVIDIA chat error: status=${providerError.status} message=${providerError.message}`);
+    res.status(providerError.status).json({ error: providerError.message });
+  }
 });
 
 // Authentication middleware helper
@@ -378,15 +438,15 @@ app.post("/api/user/sessions", (req, res) => {
   res.json({ success: true, count: sessions.length });
 });
 
-// Fast Chat completion endpoint (supports instant streaming, multi-modal images, resilient model fallback)
+// Fast NVIDIA chat completion endpoint with SSE streaming and multimodal images.
 app.post("/api/chat/stream", async (req, res) => {
   try {
-    const { messages, studentGrade, subjectFocus, modelIdentifier } = req.body;
+    const { messages, studentGrade, subjectFocus } = req.body;
 
-    const apiKey = (process.env.GEMINI_API_KEY || "").trim();
-    if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY_HERE") {
+    const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
+    if (!apiKey || apiKey === "YOUR_NVIDIA_API_KEY_HERE") {
       return res.status(500).json({
-        error: "GEMINI_API_KEY is not configured in your environment. Please open the .env file in your project root and set your valid GEMINI_API_KEY."
+        error: "NVIDIA_API_KEY is not configured in your server environment."
       });
     }
 
@@ -436,8 +496,8 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       systemInstruction += `\n- Current Subject Focus: ${subjectFocus}. Apply specialized pedagogical rigor for ${subjectFocus}.`;
     }
 
-    // Format messages safely and efficiently for Gemini API
-    const formattedContents = formatContentsForGemini(messages);
+    // Format messages safely and efficiently for NVIDIA API
+    const formattedContents = formatContentsForNvidia(messages);
 
     if (formattedContents.length === 0) {
       return res.status(400).json({ error: "No valid user message content found." });
@@ -450,68 +510,31 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
 
-    let streamCompleted = false;
-    let lastError: any = null;
-    const aiClient = getGeminiClient();
+    const stream = await getNvidiaClient().chat.completions.create({
+      model: NVIDIA_MODEL,
+      messages: toNvidiaMessages(formattedContents, systemInstruction),
+      temperature: 1,
+      top_p: 0.95,
+      max_tokens: 8192,
+      stream: true,
+    });
 
-    const preferredModel = (typeof modelIdentifier === "string" && modelIdentifier.trim())
-      ? modelIdentifier.trim()
-      : "gemini-3.7-flash";
-    const candidates = [preferredModel, ...MODEL_CANDIDATES.filter(m => m !== preferredModel)];
-
-    for (const model of candidates) {
-      let hasEmittedChunk = false;
-      try {
-        const stream = await aiClient.models.generateContentStream({
-          model,
-          contents: formattedContents,
-          config: {
-            systemInstruction: systemInstruction,
-          },
-        });
-
-        for await (const chunk of stream) {
-          let chunkText = "";
-          try {
-            chunkText = chunk.text || chunk.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
-          } catch {
-            chunkText = chunk.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
-          }
-
-          if (chunkText) {
-            hasEmittedChunk = true;
-            res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
-          }
-        }
-
-        streamCompleted = true;
-        break; // Successfully completed streaming with this model
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Model ${model} stream encountered error:`, err?.message || err);
-        // If we already emitted text to client, do not restart with a different model mid-stream
-        if (hasEmittedChunk) {
-          break;
-        }
+    for await (const chunk of stream) {
+      const chunkText = chunk.choices[0]?.delta?.content || "";
+      if (chunkText) {
+        res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
       }
-    }
-
-    if (!streamCompleted) {
-      const friendlyMessage = cleanErrorMessage(lastError);
-      res.write(`data: ${JSON.stringify({ error: friendlyMessage })}\n\n`);
-      res.end();
-      return;
     }
 
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
     res.end();
   } catch (error: any) {
-    console.error("Gemini streaming error:", error);
-    const friendlyMessage = cleanErrorMessage(error);
+    const providerError = getNvidiaError(error);
+    console.error(`NVIDIA streaming error: status=${providerError.status} message=${providerError.message}`);
     if (!res.headersSent) {
-      res.status(500).json({ error: friendlyMessage });
+      res.status(providerError.status).json({ error: providerError.message });
     } else {
-      res.write(`data: ${JSON.stringify({ error: friendlyMessage })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: providerError.message, status: providerError.status })}\n\n`);
       res.end();
     }
   }
@@ -520,11 +543,11 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
 // Non-streaming chat endpoint (fallback with model candidate resilience)
 app.post("/api/chat", async (req, res) => {
   try {
-    const { messages, studentGrade, subjectFocus, modelIdentifier } = req.body;
+    const { messages, studentGrade, subjectFocus } = req.body;
 
-    const apiKey = (process.env.GEMINI_API_KEY || "").trim();
-    if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY_HERE") {
-      return res.status(500).json({ error: "GEMINI_API_KEY is not configured in your environment. Please open the .env file in your project root and set your valid GEMINI_API_KEY." });
+    const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
+    if (!apiKey || apiKey === "YOUR_NVIDIA_API_KEY_HERE") {
+      return res.status(500).json({ error: "NVIDIA_API_KEY is not configured in your server environment." });
     }
 
     const currentDateStr = new Date().toLocaleDateString("en-US", {
@@ -568,46 +591,26 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       systemInstruction += `\nCURRENT SUBJECT FOCUS: ${subjectFocus}.`;
     }
 
-    const formattedContents = formatContentsForGemini(messages);
+    const formattedContents = formatContentsForNvidia(messages);
 
     if (formattedContents.length === 0) {
       return res.status(400).json({ error: "No valid user message content found." });
     }
 
-    let response: any = null;
-    let lastError: any = null;
-    const aiClient = getGeminiClient();
+    const completion = await getNvidiaClient().chat.completions.create({
+      model: NVIDIA_MODEL,
+      messages: toNvidiaMessages(formattedContents, systemInstruction),
+      temperature: 1,
+      top_p: 0.95,
+      max_tokens: 8192,
+      stream: false,
+    });
 
-    const preferredModel = (typeof modelIdentifier === "string" && modelIdentifier.trim())
-      ? modelIdentifier.trim()
-      : "gemini-3.7-flash";
-    const candidates = [preferredModel, ...MODEL_CANDIDATES.filter(m => m !== preferredModel)];
-
-    for (const model of candidates) {
-      try {
-        response = await aiClient.models.generateContent({
-          model,
-          contents: formattedContents,
-          config: {
-            systemInstruction: systemInstruction,
-          },
-        });
-        if (response) break;
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Model ${model} non-streaming call failed:`, err?.message || err);
-      }
-    }
-
-    if (!response) {
-      throw lastError || new Error("All AI models are currently unavailable.");
-    }
-
-    res.json({ text: response.text || "" });
+    res.json({ text: completion.choices[0]?.message?.content || "" });
   } catch (error: any) {
-    console.error("Gemini chat error:", error);
-    const friendlyMessage = cleanErrorMessage(error);
-    res.status(500).json({ error: friendlyMessage });
+    const providerError = getNvidiaError(error);
+    console.error(`NVIDIA chat error: status=${providerError.status} message=${providerError.message}`);
+    res.status(providerError.status).json({ error: providerError.message });
   }
 });
 
@@ -627,7 +630,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Vishwamedha AI server running on http://localhost:${PORT}`);
+    console.log(`Vishwamedha AI server listening on port ${PORT}`);
   });
 }
 
