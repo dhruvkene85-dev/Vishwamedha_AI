@@ -191,7 +191,7 @@ class AuthStore {
   public getUserByToken(token?: string): StoredUser | null {
     if (!token) return null;
     const cleanToken = token.replace(/^Bearer\s+/i, "").trim();
-    const row = this.db.prepare(`SELECT u.* FROM sessions s JOIN users u ON u.userId = s.userId WHERE s.token = ?`).get(cleanToken) as UserRow | undefined;
+    const row = this.db.prepare(`SELECT u.* FROM sessions s JOIN users u ON u.userId = s.userId WHERE s.token = ?`).get(cleanToken) as unknown as UserRow | undefined;
     return row ? this.mapRowToUser(row) : null;
   }
 
@@ -202,12 +202,12 @@ class AuthStore {
   }
 
   public findUserByEmail(email: string): StoredUser | null {
-    const row = this.db.prepare(`SELECT * FROM users WHERE email = ?`).get(email.toLowerCase().trim()) as UserRow | undefined;
+    const row = this.db.prepare(`SELECT * FROM users WHERE email = ?`).get(email.toLowerCase().trim()) as unknown as UserRow | undefined;
     return row ? this.mapRowToUser(row) : null;
   }
 
   public findUserById(userId: string): StoredUser | null {
-    const row = this.db.prepare(`SELECT * FROM users WHERE userId = ?`).get(userId) as UserRow | undefined;
+    const row = this.db.prepare(`SELECT * FROM users WHERE userId = ?`).get(userId) as unknown as UserRow | undefined;
     return row ? this.mapRowToUser(row) : null;
   }
 
@@ -426,7 +426,7 @@ class AuthStore {
   }
 
   public getUserSessions(userId: string): ChatSession[] {
-    const rows = this.db.prepare(`SELECT * FROM chat_sessions WHERE userId = ? ORDER BY updatedAt DESC`).all(userId) as ChatRow[];
+    const rows = this.db.prepare(`SELECT * FROM chat_sessions WHERE userId = ? ORDER BY updatedAt DESC`).all(userId) as unknown as ChatRow[];
     return rows.map((row) => this.mapRowToChatSession(row));
   }
 
