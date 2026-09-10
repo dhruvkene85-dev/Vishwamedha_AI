@@ -1,4 +1,4 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { VishwamedhaSymbol } from './Logo';
 import { AlertTriangle, RotateCcw, Home } from 'lucide-react';
 

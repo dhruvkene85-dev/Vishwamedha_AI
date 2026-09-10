@@ -410,7 +410,7 @@ export default function App() {
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
 
-      const response = await fetch('/api/chat/stream', {
+      const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -433,65 +433,9 @@ export default function App() {
         throw new Error(errDetail);
       }
 
-      if (!response.body) {
-        throw new Error('Streaming response body is unavailable.');
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let accumulatedText = '';
-      let streamDone = false;
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || '';
-
-        for (const frame of events) {
-          const trimmed = frame.trim();
-          if (!trimmed.startsWith('data:')) continue;
-
-          const payloadText = trimmed.replace(/^data:\s?/, '');
-          if (!payloadText) continue;
-
-          const payload = JSON.parse(payloadText);
-          if (payload.error) {
-            throw new Error(payload.error);
-          }
-
-          if (typeof payload.text === 'string') {
-            accumulatedText += payload.text;
-            setSessions((prev) =>
-              prev.map((s) => {
-                if (s.id !== targetSession.id) return s;
-                return {
-                  ...s,
-                  messages: s.messages.map((m) =>
-                    m.id === assistantMessageId
-                      ? { ...m, content: accumulatedText, isStreaming: true, isError: false }
-                      : m
-                  ),
-                };
-              })
-            );
-          }
-
-          if (payload.done) {
-            streamDone = true;
-          }
-        }
-      }
-
-      if (!streamDone) {
-        // The provider stream ended without the server's explicit completion event. Treat the accumulated content as the answer.
-        streamDone = true;
-      }
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      const accumulatedText = data.text || data.content || '';
 
       // Mark generation complete
       setSessions((prev) =>

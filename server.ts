@@ -475,12 +475,29 @@ app.post("/api/chat/stream", async (req, res) => {
   console.log(`[NVIDIA_STREAM] request-start`, {
     route: "/api/chat/stream",
     vercel: process.env.VERCEL || "undefined",
+    vercelEnv: process.env.VERCEL_ENV || "undefined",
     nodeEnv: process.env.NODE_ENV || "undefined",
     nvidiaModel: NVIDIA_MODEL,
     nvidiaApiKeyConfigured: apiKeyRead,
     nvidiaApiKeyLength: apiKey.length,
     messageCount: Array.isArray(req.body?.messages) ? req.body.messages.length : 0,
   });
+
+  if (process.env.VERCEL === "1") {
+    console.error(`[NVIDIA_STREAM] serverless-vercel-reject`, {
+      route: "/api/chat/stream",
+      reason: "SSE streaming is not supported by the Vercel serverless runtime; use /api/chat JSON instead.",
+      vercel: process.env.VERCEL || "undefined",
+      vercelEnv: process.env.VERCEL_ENV || "undefined",
+      nodeEnv: process.env.NODE_ENV || "undefined",
+      nvidiaApiKeyConfigured: apiKeyRead,
+      nvidiaModel: NVIDIA_MODEL,
+      elapsedMs: Date.now() - routeStart,
+    });
+    return res.status(400).json({
+      error: "Streaming is not available on Vercel serverless. Use the JSON /api/chat route.",
+    });
+  }
 
   try {
     const { messages, studentGrade, subjectFocus } = req.body;
@@ -610,11 +627,33 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
 
 // Non-streaming chat endpoint (fallback with model candidate resilience)
 app.post("/api/chat", async (req, res) => {
+  const routeStart = Date.now();
+  const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const apiKeyRead = Boolean(apiKey && apiKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  console.log(`[NVIDIA_JSON] request-start`, {
+    route: "/api/chat",
+    vercel: process.env.VERCEL || "undefined",
+    vercelEnv: process.env.VERCEL_ENV || "undefined",
+    nodeEnv: process.env.NODE_ENV || "undefined",
+    nvidiaModel: NVIDIA_MODEL,
+    nvidiaApiKeyConfigured: apiKeyRead,
+    nvidiaApiKeyLength: apiKey.length,
+    messageCount: Array.isArray(req.body?.messages) ? req.body.messages.length : 0,
+  });
+
   try {
     const { messages, studentGrade, subjectFocus } = req.body;
 
-    const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
     if (!apiKey || apiKey === "YOUR_NVIDIA_API_KEY_HERE") {
+      console.error(`[NVIDIA_JSON] missing-key`, {
+        route: "/api/chat",
+        vercel: process.env.VERCEL || "undefined",
+        vercelEnv: process.env.VERCEL_ENV || "undefined",
+        nodeEnv: process.env.NODE_ENV || "undefined",
+        nvidiaModel: NVIDIA_MODEL,
+        apiKeyConfigured: false,
+        elapsedMs: Date.now() - routeStart,
+      });
       return res.status(500).json({ error: "NVIDIA_API_KEY is not configured in your server environment." });
     }
 
@@ -665,6 +704,16 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       return res.status(400).json({ error: "No valid user message content found." });
     }
 
+    console.log(`[NVIDIA_JSON] provider-call-start`, {
+      route: "/api/chat",
+      vercel: process.env.VERCEL || "undefined",
+      vercelEnv: process.env.VERCEL_ENV || "undefined",
+      nodeEnv: process.env.NODE_ENV || "undefined",
+      model: NVIDIA_MODEL,
+      messageCount: formattedContents.length,
+      elapsedMs: Date.now() - routeStart,
+    });
+
     const completion = await getNvidiaClient().chat.completions.create({
       model: NVIDIA_MODEL,
       messages: toNvidiaMessages(formattedContents, systemInstruction),
@@ -674,10 +723,30 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       stream: false,
     });
 
+    console.log(`[NVIDIA_JSON] provider-call-complete`, {
+      route: "/api/chat",
+      vercel: process.env.VERCEL || "undefined",
+      vercelEnv: process.env.VERCEL_ENV || "undefined",
+      nodeEnv: process.env.NODE_ENV || "undefined",
+      model: NVIDIA_MODEL,
+      elapsedMs: Date.now() - routeStart,
+      responseLength: completion.choices?.[0]?.message?.content?.length || 0,
+    });
+
     res.json({ text: completion.choices[0]?.message?.content || "" });
   } catch (error: any) {
     const providerError = getNvidiaError(error);
-    console.error(`NVIDIA chat error: status=${providerError.status} message=${providerError.message}`);
+    console.error(`[NVIDIA_JSON] provider-error`, {
+      route: "/api/chat",
+      status: providerError.status,
+      message: providerError.message,
+      vercel: process.env.VERCEL || "undefined",
+      vercelEnv: process.env.VERCEL_ENV || "undefined",
+      nodeEnv: process.env.NODE_ENV || "undefined",
+      model: NVIDIA_MODEL,
+      elapsedMs: Date.now() - routeStart,
+      stack: error?.stack,
+    });
     res.status(providerError.status).json({ error: providerError.message });
   }
 });
