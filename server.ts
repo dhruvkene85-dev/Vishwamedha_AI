@@ -12,6 +12,26 @@ const app = express();
 const PORT = 3000;
 const NVIDIA_MODEL = (process.env.NVIDIA_MODEL || "meta/llama-3.2-11b-vision-instruct").trim();
 
+function logEnvironmentSnapshot(stage: string) {
+  const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const apiKeyRead = Boolean(apiKey && apiKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  const environmentSnapshot = {
+    stage,
+    nodeEnv: process.env.NODE_ENV || "undefined",
+    vercel: process.env.VERCEL || "undefined",
+    vercelEnv: process.env.VERCEL_ENV || "undefined",
+    nvidiaModel: NVIDIA_MODEL,
+    nvidiaApiKeyConfigured: apiKeyRead,
+    nvidiaApiKeyLength: apiKey.length,
+    envFileLoaded: Boolean(process.env.NVIDIA_API_KEY),
+    cwd: process.cwd(),
+  };
+
+  console.log(`[NVIDIA_ENV] ${JSON.stringify(environmentSnapshot)}`);
+}
+
+logEnvironmentSnapshot("startup");
+
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
@@ -449,17 +469,36 @@ app.post("/api/user/sessions", (req, res) => {
 
 // Fast NVIDIA chat completion endpoint with SSE streaming and multimodal images.
 app.post("/api/chat/stream", async (req, res) => {
+  const routeStart = Date.now();
+  const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const apiKeyRead = Boolean(apiKey && apiKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  console.log(`[NVIDIA_STREAM] request-start`, {
+    route: "/api/chat/stream",
+    vercel: process.env.VERCEL || "undefined",
+    nodeEnv: process.env.NODE_ENV || "undefined",
+    nvidiaModel: NVIDIA_MODEL,
+    nvidiaApiKeyConfigured: apiKeyRead,
+    nvidiaApiKeyLength: apiKey.length,
+    messageCount: Array.isArray(req.body?.messages) ? req.body.messages.length : 0,
+  });
+
   try {
     const { messages, studentGrade, subjectFocus } = req.body;
 
-    const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
     if (!apiKey || apiKey === "YOUR_NVIDIA_API_KEY_HERE") {
+      console.error(`[NVIDIA_STREAM] missing-key`, {
+        vercel: process.env.VERCEL || "undefined",
+        nodeEnv: process.env.NODE_ENV || "undefined",
+        nvidiaModel: NVIDIA_MODEL,
+        apiKeyConfigured: false,
+      });
       return res.status(500).json({
         error: "NVIDIA_API_KEY is not configured in your server environment."
       });
     }
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      console.warn(`[NVIDIA_STREAM] invalid-messages`, { messageCount: Array.isArray(messages) ? messages.length : 0 });
       return res.status(400).json({ error: "Messages array is required." });
     }
 
@@ -519,6 +558,13 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
 
+    console.log(`[NVIDIA_STREAM] provider-call-start`, {
+      model: NVIDIA_MODEL,
+      messageCount: formattedContents.length,
+      firstRole: formattedContents[0]?.role,
+      routeMs: Date.now() - routeStart,
+    });
+
     const stream = await getNvidiaClient().chat.completions.create({
       model: NVIDIA_MODEL,
       messages: toNvidiaMessages(formattedContents, systemInstruction),
@@ -537,9 +583,22 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
 
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
     res.end();
+    console.log(`[NVIDIA_STREAM] provider-call-complete`, {
+      elapsedMs: Date.now() - routeStart,
+      model: NVIDIA_MODEL,
+      backend: process.env.VERCEL === "1" ? "vercel" : "local",
+    });
   } catch (error: any) {
     const providerError = getNvidiaError(error);
-    console.error(`NVIDIA streaming error: status=${providerError.status} message=${providerError.message}`);
+    console.error(`[NVIDIA_STREAM] provider-error`, {
+      status: providerError.status,
+      message: providerError.message,
+      vercel: process.env.VERCEL || "undefined",
+      nodeEnv: process.env.NODE_ENV || "undefined",
+      model: NVIDIA_MODEL,
+      elapsedMs: Date.now() - routeStart,
+      stack: error?.stack,
+    });
     if (!res.headersSent) {
       res.status(providerError.status).json({ error: providerError.message });
     } else {
