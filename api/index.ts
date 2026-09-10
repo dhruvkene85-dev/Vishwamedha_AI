@@ -142,6 +142,19 @@ app.post("/api/chat", async (req, res) => {
 });
 
 app.post("/api/chat/stream", async (req, res) => {
+  if (process.env.VERCEL) {
+    console.warn(`[NVIDIA_STREAM] route-disabled-vercel-serverless`, {
+      route: "/api/chat/stream",
+      vercel: process.env.VERCEL || "undefined",
+      vercelEnv: process.env.VERCEL_ENV || "undefined",
+      nodeEnv: process.env.NODE_ENV || "undefined",
+      model: NVIDIA_MODEL,
+    });
+    return res.status(501).json({
+      error: "Streaming route is disabled on Vercel serverless. Use /api/chat for production. Streaming is available only on a long-lived local or dedicated backend server.",
+    });
+  }
+
   const routeStart = Date.now();
   const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
   const apiKeyRead = Boolean(apiKey && apiKey !== "YOUR_NVIDIA_API_KEY_HERE");

@@ -410,7 +410,7 @@ export default function App() {
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
 
-      let response = await fetch('/api/chat/stream', {
+      const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -421,7 +421,6 @@ export default function App() {
         signal: abortController.signal,
       });
 
-      // If streaming route returned an error before any chunks were sent, check if fallback to /api/chat is needed
       if (!response.ok) {
         let errDetail = `${response.status} ${response.statusText}`;
         try {
@@ -430,125 +429,13 @@ export default function App() {
         } catch {
           // ignore
         }
-
-        // Attempt fallback to non-streaming endpoint if streaming is not supported
-        if (response.status === 404 || (response.status === 400 && errDetail.toLowerCase().includes('streaming'))) {
-          response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messages: historyPayload,
-              studentGrade: targetSession.studentGrade || userProfile.studentGrade || appSettings.defaultGrade,
-              subjectFocus: targetSession.subjectFocus || userProfile.preferredSubject || appSettings.defaultSubject,
-            }),
-            signal: abortController.signal,
-          });
-
-          if (!response.ok) {
-            let fallbackErr = `${response.status} ${response.statusText}`;
-            try {
-              const fallbackJson = await response.json();
-              if (fallbackJson.error) fallbackErr = fallbackJson.error;
-            } catch {
-              // ignore
-            }
-            throw new Error(fallbackErr);
-          }
-
-          const data = await response.json();
-          if (data.error) throw new Error(data.error);
-          const accumulatedText = data.text || data.content || '';
-
-          setSessions((prev) =>
-            prev.map((s) => {
-              if (s.id !== targetSession.id) return s;
-              return {
-                ...s,
-                messages: s.messages.map((m) =>
-                  m.id === assistantMessageId
-                    ? {
-                        ...m,
-                        content: accumulatedText.trim() ? accumulatedText : (m.content || 'Response completed.'),
-                        isStreaming: false,
-                        isError: !accumulatedText.trim() && !m.content,
-                      }
-                    : m
-                ),
-              };
-            })
-          );
-          return;
-        }
-
         throw new Error(errDetail);
       }
 
-      if (!response.body) {
-        throw new Error('Streaming response body is unavailable.');
-      }
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let accumulatedText = '';
-      let streamDone = false;
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || '';
-
-        for (const frame of events) {
-          const trimmed = frame.trim();
-          if (!trimmed.startsWith('data:')) continue;
-
-          const payloadText = trimmed.replace(/^data:\s*/, '');
-          if (!payloadText) continue;
-
-          let payload: any;
-          try {
-            payload = JSON.parse(payloadText);
-          } catch {
-            continue;
-          }
-
-          if (payload.error) {
-            throw new Error(payload.error);
-          }
-
-          if (typeof payload.text === 'string') {
-            accumulatedText += payload.text;
-            setSessions((prev) =>
-              prev.map((s) => {
-                if (s.id !== targetSession.id) return s;
-                return {
-                  ...s,
-                  messages: s.messages.map((m) =>
-                    m.id === assistantMessageId
-                      ? { ...m, content: accumulatedText, isStreaming: true, isError: false }
-                      : m
-                  ),
-                };
-              })
-            );
-          }
-
-          if (payload.done) {
-            streamDone = true;
-          }
-        }
-      }
-
-      if (!streamDone) {
-        streamDone = true;
-      }
-
-      // Mark generation complete
+      const accumulatedText = data.text || data.content || '';
       setSessions((prev) =>
         prev.map((s) => {
           if (s.id !== targetSession.id) return s;
