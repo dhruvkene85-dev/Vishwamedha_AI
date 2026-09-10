@@ -483,22 +483,6 @@ app.post("/api/chat/stream", async (req, res) => {
     messageCount: Array.isArray(req.body?.messages) ? req.body.messages.length : 0,
   });
 
-  if (process.env.VERCEL === "1") {
-    console.error(`[NVIDIA_STREAM] serverless-vercel-reject`, {
-      route: "/api/chat/stream",
-      reason: "SSE streaming is not supported by the Vercel serverless runtime; use /api/chat JSON instead.",
-      vercel: process.env.VERCEL || "undefined",
-      vercelEnv: process.env.VERCEL_ENV || "undefined",
-      nodeEnv: process.env.NODE_ENV || "undefined",
-      nvidiaApiKeyConfigured: apiKeyRead,
-      nvidiaModel: NVIDIA_MODEL,
-      elapsedMs: Date.now() - routeStart,
-    });
-    return res.status(400).json({
-      error: "Streaming is not available on Vercel serverless. Use the JSON /api/chat route.",
-    });
-  }
-
   try {
     const { messages, studentGrade, subjectFocus } = req.body;
 
@@ -568,6 +552,12 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       return res.status(400).json({ error: "No valid user message content found." });
     }
 
+    // Track if client closed the connection prematurely
+    let isClientClosed = false;
+    req.on("close", () => {
+      isClientClosed = true;
+    });
+
     // Set up SSE headers with immediate flush
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -585,21 +575,27 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
     const stream = await getNvidiaClient().chat.completions.create({
       model: NVIDIA_MODEL,
       messages: toNvidiaMessages(formattedContents, systemInstruction),
-      temperature: 1,
-      top_p: 0.95,
+      temperature: 0.95,
+      top_p: 1,
       max_tokens: 8192,
       stream: true,
     });
 
     for await (const chunk of stream) {
+      if (isClientClosed) break;
       const chunkText = chunk.choices[0]?.delta?.content || "";
       if (chunkText) {
         res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+        if (typeof (res as any).flush === "function") {
+          (res as any).flush();
+        }
       }
     }
 
-    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-    res.end();
+    if (!isClientClosed) {
+      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      res.end();
+    }
     console.log(`[NVIDIA_STREAM] provider-call-complete`, {
       elapsedMs: Date.now() - routeStart,
       model: NVIDIA_MODEL,
@@ -717,8 +713,8 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
     const completion = await getNvidiaClient().chat.completions.create({
       model: NVIDIA_MODEL,
       messages: toNvidiaMessages(formattedContents, systemInstruction),
-      temperature: 1,
-      top_p: 0.95,
+      temperature: 0.95,
+      top_p: 1,
       max_tokens: 8192,
       stream: false,
     });
