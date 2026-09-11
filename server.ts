@@ -228,9 +228,11 @@ SPELLING, GRAMMAR & CASUAL LANGUAGE TOLERANCE:
 - Infer the intended meaning immediately and deliver the answer. Only ask a concise clarification if the question is completely illegible or genuinely ambiguous.
 
 CONVERSATION CONTEXT & FOLLOW-UPS:
-- You maintain multi-turn conversational context.
-- When the user asks a follow-up ("make it short", "explain it easy", "give 2 eg", "give another example", "prove step 2", "why is that?"), resolve all pronouns ("it", "this", "that", "the previous one") against the previous topic.
-- Modify, rephrase, summarize, or expand upon the active topic as requested without resetting or losing context.
+- You maintain multi-turn conversational context across all turns.
+- When the user asks a follow-up ("explain in simpler language", "make it short", "explain it easy", "simplify this", "give 2 eg", "give another example", "prove step 2", "why is that?"):
+  * This is ALWAYS a continuation of your immediately preceding answer. NEVER ask the user what topic or concept they want simplified.
+  * Resolve all pronouns ("it", "this", "that", "the previous one", "explain in simpler language") against the active topic from the preceding turn.
+  * Immediately re-explain, simplify, or elaborate on the topic from your previous response in everyday, intuitive terms.
 
 MATH & SCIENCE RIGOR:
 - For math questions: Show clear step-by-step working with clean LaTeX notation ($...$ for inline, $$...$$ for block formulas). Highlight the final answer clearly (e.g. **Final Answer:** $x = 5$).
@@ -426,42 +428,52 @@ function toOpenAIMessages(
   contents: Array<{ role: "user" | "model"; parts: any[] }>,
   systemInstruction: string,
   supportsVision: boolean = true
-) {
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
   return [
     { role: "system", content: systemInstruction },
     ...contents.map((content) => {
-      if (!supportsVision) {
-        const textParts = content.parts
-          .map((p: any) => p.text || (p.inlineData ? "[Attached Image]" : ""))
-          .filter(Boolean)
-          .join("\n\n");
+      const isAssistant = content.role === "model";
+      const text = content.parts
+        .map((p: any) => p.text || (p.inlineData ? "[Attached Image]" : ""))
+        .filter(Boolean)
+        .join("\n\n");
+
+      // Assistant messages in OpenAI/Groq/NVIDIA APIs MUST always have plain string content
+      if (isAssistant) {
         return {
-          role: content.role === "model" ? "assistant" : "user",
-          content: textParts || "...",
+          role: "assistant" as const,
+          content: text || "...",
         };
       }
 
-      const textParts = content.parts
-        .filter((part: any) => part.text)
-        .map((part: any) => ({ type: "text" as const, text: part.text }));
+      // User message: check for images if vision is supported
+      const imageParts = supportsVision
+        ? content.parts
+            .filter((part: any) => part.inlineData?.data)
+            .map((part: any) => ({
+              type: "image_url" as const,
+              image_url: {
+                url: `data:${part.inlineData.mimeType || "image/jpeg"};base64,${part.inlineData.data}`,
+              },
+            }))
+        : [];
 
-      const imageParts = content.parts
-        .filter((part: any) => part.inlineData?.data)
-        .map((part: any) => ({
-          type: "image_url" as const,
-          image_url: {
-            url: `data:${part.inlineData.mimeType || "image/jpeg"};base64,${part.inlineData.data}`,
-          },
-        }));
+      // If user provided image attachments, use multipart content array
+      if (imageParts.length > 0) {
+        const textParts = text ? [{ type: "text" as const, text }] : [];
+        return {
+          role: "user" as const,
+          content: [...textParts, ...imageParts],
+        };
+      }
 
-      const parts = [...textParts, ...imageParts];
-
+      // Plain text user message: ALWAYS a string for 100% ChatML template compatibility
       return {
-        role: content.role === "model" ? "assistant" : "user",
-        content: parts.length > 0 ? parts : [{ type: "text" as const, text: "..." }],
+        role: "user" as const,
+        content: text || "...",
       };
     }),
-  ] as OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+  ];
 }
 
 const toNvidiaMessages = toOpenAIMessages;

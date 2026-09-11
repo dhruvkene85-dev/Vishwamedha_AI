@@ -456,27 +456,34 @@ app.post("/api/chat", async (req, res) => {
     } else if (provider === "groq") {
       const isVision = modelSupportsVision(model);
       const groqMessages = messages.map((message: any) => {
-        if (!isVision) {
-          const text = message.content?.trim() || (message.images?.length ? "[Attached Image]" : "");
+        const isAssistant = message.role !== "user";
+        const text = message.content?.trim() || "";
+
+        if (isAssistant || !isVision) {
           return {
-            role: message.role === "user" ? "user" : "assistant",
-            content: text || "...",
+            role: isAssistant ? "assistant" : "user",
+            content: text || (message.images?.length ? "[Attached Image]" : "..."),
           };
         }
-        const textParts = message.content?.trim()
-          ? [{ type: "text", text: message.content.trim() }]
-          : [];
+
         const imageParts = (message.images || [])
           .filter((img: any) => img.data)
           .map((img: any) => ({
             type: "image_url",
             image_url: { url: img.data },
           }));
-        const content = [...textParts, ...imageParts];
+
+        if (imageParts.length > 0) {
+          const textParts = text ? [{ type: "text", text }] : [];
+          return {
+            role: "user",
+            content: [...textParts, ...imageParts],
+          };
+        }
 
         return {
-          role: message.role === "user" ? "user" : "assistant",
-          content: content.length === 1 && content[0].type === "text" ? content[0].text : (content.length > 0 ? content : "..."),
+          role: "user",
+          content: text || "...",
         };
       });
 
