@@ -116,6 +116,7 @@ export default function App() {
   const [isPracticeModalOpen, setIsPracticeModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
+  const chatFeedRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -192,10 +193,13 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Auto-scroll when messages change or stream
+  // Auto-scroll when messages change or stream (scoped to chatFeed container only to prevent window shifts)
   useEffect(() => {
-    if (currentScreen === 'chat' && appSettings.autoScroll) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (currentScreen === 'chat' && appSettings.autoScroll && chatFeedRef.current) {
+      chatFeedRef.current.scrollTo({
+        top: chatFeedRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
     }
   }, [activeSession?.messages, isLoading, currentScreen, appSettings.autoScroll]);
 
@@ -643,7 +647,7 @@ export default function App() {
         {currentScreen === 'chat' && (
           <div className="flex-1 flex flex-col min-h-0 w-full bg-slate-50 overflow-hidden">
             {/* Scrollable Conversation Feed */}
-            <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 w-full smooth-scroll">
+            <div ref={chatFeedRef} className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 w-full smooth-scroll">
               {(!activeSession || activeSession.messages.length === 0) ? (
                 <WelcomeState
                   onSelectPrompt={(prompt) => handleSendMessage(prompt)}
