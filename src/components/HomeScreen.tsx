@@ -18,8 +18,10 @@ import {
 } from 'lucide-react';
 import { ChatSession, StudentGrade, SubjectFocus, UserProfile } from '../types';
 import { VishwamedhaLogo, VishwamedhaSymbol } from './Logo';
+import { getModelDisplayName } from '../utils/modelLabels';
 
 interface HomeScreenProps {
+  activeModel?: string;
   onStartNewChat: () => void;
   onOpenChatWithPrompt: (prompt: string, grade?: StudentGrade, subject?: SubjectFocus) => void;
   onSelectSession: (id: string) => void;
@@ -32,6 +34,7 @@ interface HomeScreenProps {
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
+  activeModel,
   onStartNewChat,
   onOpenChatWithPrompt,
   onSelectSession,
@@ -172,7 +175,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
           <div className="bg-white/5 rounded-xl p-3 border border-white/5">
             <div className="text-[11px] text-slate-400 font-medium">Active Engine</div>
-            <div className="text-sm font-bold text-amber-300 mt-0.5 truncate">Meta Muse Glimmer 30B</div>
+            <div className="text-sm font-bold text-amber-300 mt-0.5 truncate" title={getModelDisplayName(activeModel)}>
+              {getModelDisplayName(activeModel)}
+            </div>
           </div>
         </div>
       </div>

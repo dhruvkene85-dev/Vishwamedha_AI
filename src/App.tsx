@@ -623,6 +623,7 @@ export default function App() {
         {/* Screen 1: Home Screen */}
         {currentScreen === 'home' && (
           <HomeScreen
+            activeModel={appSettings.modelIdentifier}
             onStartNewChat={() => handleNewSession()}
             onOpenChatWithPrompt={handleOpenChatWithPrompt}
             onSelectSession={(id) => {

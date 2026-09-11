@@ -19,6 +19,7 @@ import {
 import { AppSettings, ChatSession, StudentGrade, SubjectFocus, ResponseStyle } from '../types';
 import { VishwamedhaLogo, VishwamedhaSymbol } from './Logo';
 import { QuotaDiagnostics } from './QuotaDiagnostics';
+import { getModelDisplayName } from '../utils/modelLabels';
 
 interface SettingsScreenProps {
   settings: AppSettings;
@@ -126,7 +127,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             </h2>
           </div>
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-            Active: {settings.modelIdentifier || 'gemini-2.0-flash'}
+            Active: {getModelDisplayName(settings.modelIdentifier)}
           </span>
         </div>
 
