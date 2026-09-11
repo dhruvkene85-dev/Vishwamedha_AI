@@ -165,27 +165,24 @@ export default function App() {
       .then((res) => res.json())
       .then((data) => {
         if (data && data.activeModel) {
-          const lastServerProvider = localStorage.getItem('vishwamedha_last_server_provider');
-          // If the server's AI_PROVIDER changed in .env (e.g. nvidia -> groq), immediately sync model
-          if (lastServerProvider !== data.activeProvider) {
-            localStorage.setItem('vishwamedha_last_server_provider', data.activeProvider);
-            setAppSettings((prev) => ({ ...prev, modelIdentifier: data.activeModel }));
-            return;
-          }
-
           setAppSettings((prev) => {
             const currentModel = prev.modelIdentifier || '';
-            const isGemini = currentModel.toLowerCase().includes('gemini');
-            const isGroq = currentModel.toLowerCase().includes('groq') || currentModel.toLowerCase().includes('qwen') || currentModel.toLowerCase().includes('gpt-oss');
-            const isNvidia = currentModel.toLowerCase().includes('meta') || currentModel.toLowerCase().includes('llama') || currentModel.toLowerCase().includes('muse');
+            if (!currentModel || currentModel === 'auto') {
+              return { ...prev, modelIdentifier: data.activeModel };
+            }
+
+            const m = currentModel.toLowerCase();
+            const isGemini = m.includes('gemini');
+            const isGroq = m.includes('groq') || m.includes('qwen') || m.includes('gpt-oss') || m.includes('llama-3.3') || m.includes('llama-3.1');
+            const isNvidia = m.includes('nvidia') || m.includes('nemotron') || m.includes('meta') || m.includes('llama') || m.includes('muse');
 
             const isCurrentConfigured =
               (isGemini && data.configuredProviders?.gemini) ||
               (isGroq && data.configuredProviders?.groq) ||
               (isNvidia && data.configuredProviders?.nvidia);
 
-            // Automatically switch if the selected model has no API key configured on the server
-            if (!isCurrentConfigured || !currentModel) {
+            // Only switch to server default if the user's selected model has no API key configured on the server
+            if (!isCurrentConfigured) {
               return { ...prev, modelIdentifier: data.activeModel };
             }
             return prev;

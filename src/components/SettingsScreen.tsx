@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { AppSettings, ChatSession, StudentGrade, SubjectFocus, ResponseStyle } from '../types';
 import { VishwamedhaLogo, VishwamedhaSymbol } from './Logo';
+import { QuotaDiagnostics } from './QuotaDiagnostics';
 
 interface SettingsScreenProps {
   settings: AppSettings;
@@ -158,11 +159,13 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant (Groq)</option>
               </optgroup>
               <optgroup label="Google AI Studio (Gemini)">
+                <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
                 <option value="gemini-2.0-flash">Gemini 2.0 Flash (Fastest / Recommended)</option>
                 <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                 <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
               </optgroup>
               <optgroup label="NVIDIA NIM API">
+                <option value="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning">NVIDIA Nemotron 3 Nano Omni 30B (Reasoning)</option>
                 <option value="meta/llama-3.2-11b-vision-instruct">Meta Llama 3.2 11B Vision Instruct</option>
                 <option value="meta/muse-glimmer-30b">Muse Glimmer 30B</option>
               </optgroup>
@@ -195,7 +198,10 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </div>
       </div>
 
-      {/* 2. Academic Defaults */}
+      {/* 2. API Quotas, Rate Limits & Diagnostics */}
+      <QuotaDiagnostics />
+
+      {/* 3. Academic Defaults */}
       <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-2xs space-y-4">
         <div className="flex items-center gap-2 text-indigo-600">
           <Sliders className="w-4 h-4" />

@@ -71,6 +71,141 @@ function getGroqClient() {
   });
 }
 
+export interface GroqQuotaTelemetry {
+  remainingRequests: string | null;
+  limitRequests: string | null;
+  remainingTokens: string | null;
+  limitTokens: string | null;
+  resetTokens: string | null;
+  resetRequests: string | null;
+  lastUpdated: number | null;
+}
+
+let latestGroqTelemetry: GroqQuotaTelemetry = {
+  remainingRequests: null,
+  limitRequests: null,
+  remainingTokens: null,
+  limitTokens: null,
+  resetTokens: null,
+  resetRequests: null,
+  lastUpdated: null,
+};
+
+const sessionMetrics = {
+  totalRequests: 0,
+  groqRequests: 0,
+  nvidiaRequests: 0,
+  geminiRequests: 0,
+  startTime: Date.now(),
+};
+
+function updateGroqTelemetryFromHeaders(headers: any) {
+  if (!headers) return;
+  const getHeader = (name: string) => {
+    if (typeof headers.get === "function") return headers.get(name);
+    return headers[name] || headers[name.toLowerCase()] || null;
+  };
+
+  const remainingReq = getHeader("x-ratelimit-remaining-requests");
+  const limitReq = getHeader("x-ratelimit-limit-requests");
+  const remainingTok = getHeader("x-ratelimit-remaining-tokens");
+  const limitTok = getHeader("x-ratelimit-limit-tokens");
+  const resetTok = getHeader("x-ratelimit-reset-tokens");
+  const resetReq = getHeader("x-ratelimit-reset-requests");
+
+  if (remainingReq !== null || remainingTok !== null || limitReq !== null) {
+    console.log("[GROQ_HEADERS]", { remainingReq, limitReq, remainingTok, limitTok, resetTok, resetReq });
+    latestGroqTelemetry = {
+      remainingRequests: remainingReq,
+      limitRequests: limitReq,
+      remainingTokens: remainingTok,
+      limitTokens: limitTok,
+      resetTokens: resetTok,
+      resetRequests: resetReq,
+      lastUpdated: Date.now(),
+    };
+  }
+}
+
+function parseResetToSeconds(resetStr: string | null): number {
+  if (!resetStr) return 0;
+  let totalSec = 0;
+  const dMatch = resetStr.match(/(\d+(?:\.\d+)?)d/);
+  if (dMatch) totalSec += parseFloat(dMatch[1]) * 86400;
+  const hMatch = resetStr.match(/(\d+(?:\.\d+)?)h/);
+  if (hMatch) totalSec += parseFloat(hMatch[1]) * 3600;
+  const mMatch = resetStr.match(/(\d+(?:\.\d+)?)m(?!s)/);
+  if (mMatch) totalSec += parseFloat(mMatch[1]) * 60;
+  const msMatch = resetStr.match(/(\d+(?:\.\d+)?)ms/);
+  if (msMatch) totalSec += parseFloat(msMatch[1]) / 1000;
+  const withoutMs = resetStr.replace(/(\d+(?:\.\d+)?)ms/g, '');
+  const sMatch = withoutMs.match(/(\d+(?:\.\d+)?)s/);
+  if (sMatch) totalSec += parseFloat(sMatch[1]);
+  if (!dMatch && !hMatch && !mMatch && !msMatch && !sMatch) {
+    const rawNum = parseFloat(resetStr);
+    if (!isNaN(rawNum)) totalSec = rawNum;
+  }
+  return totalSec;
+}
+
+function getDynamicGroqTelemetry(): GroqQuotaTelemetry {
+  if (!latestGroqTelemetry.lastUpdated) {
+    return latestGroqTelemetry;
+  }
+
+  const elapsedSec = Math.max(0, (Date.now() - latestGroqTelemetry.lastUpdated) / 1000);
+  const tokenResetSec = parseResetToSeconds(latestGroqTelemetry.resetTokens);
+  const requestResetSec = parseResetToSeconds(latestGroqTelemetry.resetRequests);
+
+  let dynamicRemainingTokens = latestGroqTelemetry.remainingTokens;
+  let dynamicResetTokens = latestGroqTelemetry.resetTokens;
+
+  if (latestGroqTelemetry.limitTokens && latestGroqTelemetry.remainingTokens) {
+    const limitTok = parseFloat(latestGroqTelemetry.limitTokens);
+    const remTok = parseFloat(latestGroqTelemetry.remainingTokens);
+    if (!isNaN(limitTok) && !isNaN(remTok)) {
+      if (tokenResetSec <= 0 || elapsedSec >= tokenResetSec) {
+        dynamicRemainingTokens = String(limitTok);
+        dynamicResetTokens = "0s";
+      } else {
+        const ratio = elapsedSec / tokenResetSec;
+        const recovered = Math.min(limitTok, Math.round(remTok + (limitTok - remTok) * ratio));
+        dynamicRemainingTokens = String(recovered);
+        dynamicResetTokens = `${Math.max(0, tokenResetSec - elapsedSec).toFixed(1)}s`;
+      }
+    }
+  }
+
+  let dynamicRemainingRequests = latestGroqTelemetry.remainingRequests;
+  let dynamicResetRequests = latestGroqTelemetry.resetRequests;
+
+  if (latestGroqTelemetry.limitRequests && latestGroqTelemetry.remainingRequests) {
+    const limitReq = parseFloat(latestGroqTelemetry.limitRequests);
+    const remReq = parseFloat(latestGroqTelemetry.remainingRequests);
+    if (!isNaN(limitReq) && !isNaN(remReq)) {
+      if (requestResetSec <= 0 || elapsedSec >= requestResetSec) {
+        dynamicRemainingRequests = String(limitReq);
+        dynamicResetRequests = "0s";
+      } else {
+        const remainingTime = Math.max(0, requestResetSec - elapsedSec);
+        if (remainingTime > 60) {
+          dynamicResetRequests = `${Math.floor(remainingTime / 60)}m ${Math.round(remainingTime % 60)}s`;
+        } else {
+          dynamicResetRequests = `${remainingTime.toFixed(1)}s`;
+        }
+      }
+    }
+  }
+
+  return {
+    ...latestGroqTelemetry,
+    remainingTokens: dynamicRemainingTokens,
+    resetTokens: dynamicResetTokens,
+    remainingRequests: dynamicRemainingRequests,
+    resetRequests: dynamicResetRequests,
+  };
+}
+
 const VISHWAMEDHA_SYSTEM_INSTRUCTION = `You are Vishwamedha AI, a highly capable, general-purpose conversational AI assistant and tutor.
 Tagline: Intelligence Without Boundaries.
 
@@ -204,7 +339,11 @@ function getGroqError(error: any): { status: number; message: string } {
 }
 
 function resolveProvider(reqBody: any): { provider: "gemini" | "nvidia" | "groq"; model: string } {
-  const rawModel = (typeof reqBody?.modelIdentifier === "string" ? reqBody.modelIdentifier.trim() : "");
+  const rawModel = (
+    typeof reqBody?.modelIdentifier === "string"
+      ? reqBody.modelIdentifier.trim()
+      : (typeof reqBody?.model === "string" ? reqBody.model.trim() : "")
+  );
   const modelIdentifier = rawModel === "auto" ? "" : rawModel;
   const requestedProvider = (typeof reqBody?.provider === "string" ? reqBody.provider.trim().toLowerCase() : "");
 
@@ -215,67 +354,49 @@ function resolveProvider(reqBody: any): { provider: "gemini" | "nvidia" | "groq"
   const isGemini = Boolean(geminiKey && !geminiKey.includes("YOUR_") && !geminiKey.includes("MY_"));
   const isGroq = Boolean(groqKey && !groqKey.includes("YOUR_"));
 
-  // 1. Determine active server provider configured in .env
+  // Default provider from .env
   const envProv = (AI_PROVIDER as any) === "groq" ? "groq" : ((AI_PROVIDER as any) === "nvidia" ? "nvidia" : "gemini");
 
-  let provider: "gemini" | "nvidia" | "groq";
+  let provider: "gemini" | "nvidia" | "groq" = envProv;
+  let model: string = "";
 
-  // 2. If client explicitly passed a provider parameter ("groq" | "nvidia" | "gemini")
+  // 1. Explicit provider requested in body
   if (requestedProvider === "groq" && isGroq) {
     provider = "groq";
   } else if (requestedProvider === "nvidia" && isNvidia) {
     provider = "nvidia";
   } else if (requestedProvider === "gemini" && isGemini) {
     provider = "gemini";
-  } else if (!modelIdentifier) {
-    // No model specified or "auto": always follow .env AI_PROVIDER
-    if (envProv === "groq" && isGroq) provider = "groq";
-    else if (envProv === "nvidia" && isNvidia) provider = "nvidia";
-    else if (envProv === "gemini" && isGemini) provider = "gemini";
-    else if (isGroq) provider = "groq";
-    else if (isNvidia) provider = "nvidia";
-    else if (isGemini) provider = "gemini";
-    else provider = envProv;
-  } else {
-    // 3. Client sent a modelIdentifier.
-    // If model matches envProv, use envProv.
-    // If the server has a configured envProv, prioritize the server's AI_PROVIDER over stale browser caches!
+  } else if (modelIdentifier) {
+    // 2. Explicit model selected by user in Settings UI
     const m = modelIdentifier.toLowerCase();
-    const isModelGemini = m.includes("gemini");
-    const isModelGroq = m.includes("groq") || m.includes("qwen") || m.includes("gpt-oss") || m.includes("llama-3.3") || m.includes("llama-3.1");
-    const isModelNvidia = m.includes("meta") || m.includes("llama-3.2") || m.includes("muse");
+    const isGroqModel = m.includes("groq") || m.includes("qwen") || m.includes("gpt-oss") || m.includes("llama-3.3") || m.includes("llama-3.1");
+    const isNvidiaModel = m.includes("nvidia") || m.includes("nemotron") || m.includes("meta") || m.includes("llama") || m.includes("muse");
+    const isGeminiModel = m.includes("gemini");
 
-    if (envProv === "groq" && isModelGroq && isGroq) {
+    if (isGroqModel && isGroq) {
       provider = "groq";
-    } else if (envProv === "nvidia" && isModelNvidia && isNvidia) {
+      model = modelIdentifier;
+    } else if (isNvidiaModel && isNvidia) {
       provider = "nvidia";
-    } else if (envProv === "gemini" && isModelGemini && isGemini) {
+      model = modelIdentifier;
+    } else if (isGeminiModel && isGemini) {
       provider = "gemini";
-    } else if (envProv === "groq" && isGroq) {
-      provider = "groq";
-    } else if (envProv === "nvidia" && isNvidia) {
-      provider = "nvidia";
-    } else if (envProv === "gemini" && isGemini) {
-      provider = "gemini";
-    } else if (isModelGroq && isGroq) {
-      provider = "groq";
-    } else if (isModelNvidia && isNvidia) {
-      provider = "nvidia";
-    } else if (isModelGemini && isGemini) {
-      provider = "gemini";
-    } else {
-      provider = envProv;
+      model = modelIdentifier;
     }
   }
 
-  // 4. Resolve Model:
-  let model = modelIdentifier;
-  const isTargetMatchingProvider =
-    (provider === "gemini" && model.toLowerCase().includes("gemini")) ||
-    (provider === "groq" && (model.toLowerCase().includes("groq") || model.toLowerCase().includes("qwen") || model.toLowerCase().includes("gpt-oss") || model.toLowerCase().includes("llama-3.3") || model.toLowerCase().includes("llama-3.1"))) ||
-    (provider === "nvidia" && (model.toLowerCase().includes("meta") || model.toLowerCase().includes("llama-3.2") || model.toLowerCase().includes("muse")));
+  // 3. Fallback if the chosen provider has no valid API key configured
+  if (provider === "groq" && !isGroq) {
+    provider = isNvidia ? "nvidia" : (isGemini ? "gemini" : "groq");
+  } else if (provider === "nvidia" && !isNvidia) {
+    provider = isGroq ? "groq" : (isGemini ? "gemini" : "nvidia");
+  } else if (provider === "gemini" && !isGemini) {
+    provider = isGroq ? "groq" : (isNvidia ? "nvidia" : "gemini");
+  }
 
-  if (!model || !isTargetMatchingProvider) {
+  // 4. Default model if not explicitly resolved
+  if (!model) {
     if (provider === "groq") model = GROQ_MODEL;
     else if (provider === "gemini") model = GEMINI_MODEL;
     else model = NVIDIA_MODEL;
@@ -289,6 +410,16 @@ interface InputMessage {
   content?: string;
   images?: Array<{ mimeType: string; data: string }>;
   isError?: boolean;
+}
+
+function modelSupportsVision(model: string): boolean {
+  const m = model.toLowerCase();
+  // Pure text-only models that do not accept image_url in messages:
+  if (m.includes("gpt-oss") || m.includes("llama-3.3") || m.includes("llama-3.1")) {
+    return false;
+  }
+  // Qwen (e.g. qwen/qwen3.8-27b), Nemotron, Gemini, Muse, and Vision models support images
+  return true;
 }
 
 function toOpenAIMessages(
@@ -310,22 +441,20 @@ function toOpenAIMessages(
         };
       }
 
-      const parts = content.parts
-        .map((part: any) => {
-          if (part.text) {
-            return { type: "text" as const, text: part.text };
-          }
-          if (part.inlineData?.data) {
-            return {
-              type: "image_url" as const,
-              image_url: {
-                url: `data:${part.inlineData.mimeType || "image/jpeg"};base64,${part.inlineData.data}`,
-              },
-            };
-          }
-          return null;
-        })
-        .filter(Boolean);
+      const textParts = content.parts
+        .filter((part: any) => part.text)
+        .map((part: any) => ({ type: "text" as const, text: part.text }));
+
+      const imageParts = content.parts
+        .filter((part: any) => part.inlineData?.data)
+        .map((part: any) => ({
+          type: "image_url" as const,
+          image_url: {
+            url: `data:${part.inlineData.mimeType || "image/jpeg"};base64,${part.inlineData.data}`,
+          },
+        }));
+
+      const parts = [...textParts, ...imageParts];
 
       return {
         role: content.role === "model" ? "assistant" : "user",
@@ -466,7 +595,75 @@ app.get("/api/health", (req, res) => {
       gemini: isGeminiConfigured,
       groq: isGroqConfigured,
     },
+    groqTelemetry: latestGroqTelemetry,
+    sessionMetrics,
     ready: isNvidiaConfigured || isGeminiConfigured || isGroqConfigured,
+  });
+});
+
+// Comprehensive API Quotas & Rate Limits endpoint
+app.get("/api/quotas", async (req, res) => {
+  const nvidiaKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
+  const groqKey = (process.env.GROQ_API_KEY || "").trim();
+  const isNvidiaConfigured = Boolean(nvidiaKey && nvidiaKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  const isGeminiConfigured = Boolean(geminiKey && !geminiKey.includes("YOUR_") && !geminiKey.includes("MY_"));
+  const isGroqConfigured = Boolean(groqKey && !groqKey.includes("YOUR_"));
+
+  // Probe Groq live endpoint if explicitly requested (e.g. user clicked Refresh in UI)
+  if (req.query.probe === "true" && isGroqConfigured) {
+    try {
+      const probeModel = GROQ_MODEL || "qwen/qwen3.8-27b";
+      const rawRes = await getGroqClient().chat.completions.create({
+        model: probeModel,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+      }).withResponse();
+      updateGroqTelemetryFromHeaders(rawRes.response.headers);
+    } catch (probeErr: any) {
+      console.warn("[GROQ_PROBE] Live header probe error:", probeErr?.message || probeErr);
+    }
+  }
+
+  const dynamicGroq = getDynamicGroqTelemetry();
+
+  res.json({
+    activeProvider: AI_PROVIDER,
+    groq: {
+      configured: isGroqConfigured,
+      model: GROQ_MODEL,
+      telemetryType: "live_headers",
+      telemetry: dynamicGroq,
+      publishedLimits: {
+        note: "Transmitted live via x-ratelimit headers on every request",
+        requestsPerDay: "14,400 RPD",
+        tokensPerMinute: "6,000 TPM",
+      },
+      dashboardUrl: "https://console.groq.com/settings/limits",
+    },
+    gemini: {
+      configured: isGeminiConfigured,
+      model: GEMINI_MODEL,
+      telemetryType: "published_specs",
+      publishedLimits: {
+        rpm: 15,
+        rpd: 1500,
+        tpm: 1000000,
+        note: "Google AI Studio does not provide real-time headers for 200 OK responses.",
+      },
+      dashboardUrl: "https://aistudio.google.com/",
+    },
+    nvidia: {
+      configured: isNvidiaConfigured,
+      model: NVIDIA_MODEL,
+      telemetryType: "published_specs",
+      publishedLimits: {
+        rpm: 40,
+        note: "NVIDIA NIM operates on a fixed trial rate limit of 40 RPM.",
+      },
+      dashboardUrl: "https://build.nvidia.com/",
+    },
+    sessionMetrics,
   });
 });
 
@@ -752,6 +949,8 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
     res.flushHeaders();
 
     if (provider === "gemini") {
+      sessionMetrics.totalRequests++;
+      sessionMetrics.geminiRequests++;
       console.log(`[GEMINI_STREAM] provider-call-start`, {
         model,
         messageCount: formattedContents.length,
@@ -793,20 +992,24 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       });
       console.log(`[Chat Reply Stream] [Gemini - ${model}] Stream completed in ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
     } else if (provider === "groq") {
+      sessionMetrics.totalRequests++;
+      sessionMetrics.groqRequests++;
       console.log(`[GROQ_STREAM] provider-call-start`, {
         model,
         messageCount: formattedContents.length,
         routeMs: Date.now() - routeStart,
       });
 
-      const isVisionModel = model.toLowerCase().includes("vision");
-      const stream = await getGroqClient().chat.completions.create({
+      const isVision = modelSupportsVision(model);
+      const { data: stream, response: rawResponse } = await getGroqClient().chat.completions.create({
         model,
-        messages: toOpenAIMessages(formattedContents, systemInstruction, isVisionModel),
+        messages: toOpenAIMessages(formattedContents, systemInstruction, isVision),
         temperature: 0.7,
         max_tokens: 8192,
         stream: true,
-      });
+      }).withResponse();
+
+      updateGroqTelemetryFromHeaders(rawResponse.headers);
 
       for await (const chunk of stream) {
         if (isClientClosed) break;
@@ -830,6 +1033,8 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       });
       console.log(`[Chat Reply Stream] [Groq - ${model}] Stream completed in ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
     } else {
+      sessionMetrics.totalRequests++;
+      sessionMetrics.nvidiaRequests++;
       console.log(`[NVIDIA_STREAM] provider-call-start`, {
         model,
         messageCount: formattedContents.length,
@@ -986,6 +1191,8 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
     }
 
     if (provider === "gemini") {
+      sessionMetrics.totalRequests++;
+      sessionMetrics.geminiRequests++;
       console.log(`[GEMINI_JSON] provider-call-start`, {
         route: "/api/chat",
         model,
@@ -1017,6 +1224,8 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
 
       return res.json({ text: responseText, provider: "gemini", model });
     } else if (provider === "groq") {
+      sessionMetrics.totalRequests++;
+      sessionMetrics.groqRequests++;
       console.log(`[GROQ_JSON] provider-call-start`, {
         route: "/api/chat",
         model,
@@ -1024,16 +1233,17 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
         elapsedMs: Date.now() - routeStart,
       });
 
-      const isVisionModel = model.toLowerCase().includes("vision");
+      const isVision = modelSupportsVision(model);
       let responseText = "";
       try {
-        const completion = await getGroqClient().chat.completions.create({
+        const { data: completion, response: rawResponse } = await getGroqClient().chat.completions.create({
           model,
-          messages: toOpenAIMessages(formattedContents, systemInstruction, isVisionModel),
+          messages: toOpenAIMessages(formattedContents, systemInstruction, isVision),
           temperature: 0.7,
           max_tokens: 8192,
           stream: false,
-        });
+        }).withResponse();
+        updateGroqTelemetryFromHeaders(rawResponse.headers);
         responseText = completion.choices[0]?.message?.content || "";
       } catch (chatErr: any) {
         if (typeof (getGroqClient().responses as any)?.create === "function") {
@@ -1061,6 +1271,8 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
 
       return res.json({ text: responseText, provider: "groq", model });
     } else {
+      sessionMetrics.totalRequests++;
+      sessionMetrics.nvidiaRequests++;
       console.log(`[NVIDIA_JSON] provider-call-start`, {
         route: "/api/chat",
         model,
