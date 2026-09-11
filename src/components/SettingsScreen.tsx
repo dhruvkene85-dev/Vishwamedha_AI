@@ -125,7 +125,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             </h2>
           </div>
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-            Active: {settings.modelIdentifier || 'meta/llama-3.2-11b-vision-instruct'}
+            Active: {settings.modelIdentifier || 'gemini-2.0-flash'}
           </span>
         </div>
 
@@ -135,22 +135,37 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             <div>
               <div className="font-bold text-slate-900 flex items-center gap-1.5 text-sm">
                 <Sparkles className="w-4 h-4 text-indigo-600" />
-                <span>Primary NVIDIA Model</span>
+                <span>AI Engine & Model</span>
               </div>
               <p className="text-slate-500 text-[11px] mt-0.5">
-                Select the NVIDIA model used for generation.
+                Switch between Groq LPU, Google Gemini AI Studio, and NVIDIA NIM models to benchmark speed and latency.
               </p>
             </div>
 
             <select
-              value={settings.modelIdentifier || 'meta/llama-3.2-11b-vision-instruct'}
+              value={settings.modelIdentifier || 'auto'}
               onChange={(e) => {
                 onUpdateSettings({ ...settings, modelIdentifier: e.target.value });
-                showSuccess(`Model updated to ${e.target.value}`);
+                showSuccess(`Model updated to ${e.target.value === 'auto' ? 'Default (.env)' : e.target.value}`);
               }}
               className="bg-white px-3 py-2 border border-indigo-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs cursor-pointer"
             >
-              <option value="meta/llama-3.2-11b-vision-instruct">Meta Llama 3.2 11B Vision Instruct</option>
+              <option value="auto">⚡ Auto (Follow .env AI_PROVIDER)</option>
+              <optgroup label="Groq (Ultra-Fast Inference)">
+                <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B (Groq)</option>
+                <option value="qwen/qwen3.8-27b">Qwen 3.8 27B (Groq)</option>
+                <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile (Groq)</option>
+                <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant (Groq)</option>
+              </optgroup>
+              <optgroup label="Google AI Studio (Gemini)">
+                <option value="gemini-2.0-flash">Gemini 2.0 Flash (Fastest / Recommended)</option>
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+              </optgroup>
+              <optgroup label="NVIDIA NIM API">
+                <option value="meta/llama-3.2-11b-vision-instruct">Meta Llama 3.2 11B Vision Instruct</option>
+                <option value="meta/muse-glimmer-30b">Muse Glimmer 30B</option>
+              </optgroup>
             </select>
           </div>
 

@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { authStore } from "./src/server/authStore";
@@ -11,23 +12,29 @@ dotenv.config({ path: ".env.local", override: true });
 const app = express();
 const PORT = 3000;
 const NVIDIA_MODEL = (process.env.NVIDIA_MODEL || "meta/llama-3.2-11b-vision-instruct").trim();
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
+const GROQ_MODEL = (process.env.GROQ_MODEL || "openai/gpt-oss-20b").trim();
+const AI_PROVIDER = (process.env.AI_PROVIDER || "gemini").trim().toLowerCase();
 
 function logEnvironmentSnapshot(stage: string) {
-  const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
-  const apiKeyRead = Boolean(apiKey && apiKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  const nvidiaKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
+  const groqKey = (process.env.GROQ_API_KEY || "").trim();
   const environmentSnapshot = {
     stage,
+    activeProvider: AI_PROVIDER,
+    groqModel: GROQ_MODEL,
+    groqApiKeyConfigured: Boolean(groqKey && !groqKey.includes("YOUR_")),
+    geminiModel: GEMINI_MODEL,
+    geminiApiKeyConfigured: Boolean(geminiKey && !geminiKey.includes("YOUR_") && !geminiKey.includes("MY_")),
+    nvidiaModel: NVIDIA_MODEL,
+    nvidiaApiKeyConfigured: Boolean(nvidiaKey && nvidiaKey !== "YOUR_NVIDIA_API_KEY_HERE"),
     nodeEnv: process.env.NODE_ENV || "undefined",
     vercel: process.env.VERCEL || "undefined",
-    vercelEnv: process.env.VERCEL_ENV || "undefined",
-    nvidiaModel: NVIDIA_MODEL,
-    nvidiaApiKeyConfigured: apiKeyRead,
-    nvidiaApiKeyLength: apiKey.length,
-    envFileLoaded: Boolean(process.env.NVIDIA_API_KEY),
     cwd: process.cwd(),
   };
 
-  console.log(`[NVIDIA_ENV] ${JSON.stringify(environmentSnapshot)}`);
+  console.log(`[AI_ENV] ${JSON.stringify(environmentSnapshot)}`);
 }
 
 logEnvironmentSnapshot("startup");
@@ -48,6 +55,19 @@ function getNvidiaClient() {
   return new OpenAI({
     apiKey: (process.env.NVIDIA_API_KEY || "").trim(),
     baseURL: "https://integrate.api.nvidia.com/v1",
+  });
+}
+
+function getGeminiClient() {
+  return new GoogleGenAI({
+    apiKey: (process.env.GEMINI_API_KEY || "").trim(),
+  });
+}
+
+function getGroqClient() {
+  return new OpenAI({
+    apiKey: (process.env.GROQ_API_KEY || "").trim(),
+    baseURL: "https://api.groq.com/openai/v1",
   });
 }
 
@@ -119,6 +139,11 @@ function cleanErrorMessage(err: any): string {
   if (!err) return "An unexpected error occurred.";
   let msg = err.message || (typeof err === "string" ? err : JSON.stringify(err));
 
+  // Security: Redact potential raw API keys from error messages
+  msg = msg.replace(/nvapi-[A-Za-z0-9_-]{20,}/g, "nvapi-[REDACTED]");
+  msg = msg.replace(/gsk_[A-Za-z0-9_-]{20,}/g, "gsk_[REDACTED]");
+  msg = msg.replace(/AIza[0-9A-Za-z-_]{35}/g, "AIza[REDACTED]");
+
   // Attempt to extract inner JSON error from SDK response
   try {
     const jsonMatch = msg.match(/\{[\s\S]*"error"[\s\S]*\}/);
@@ -142,7 +167,12 @@ function cleanErrorMessage(err: any): string {
     return "Vishwamedha AI is momentarily rate-limited. Please wait a few seconds and click Retry.";
   }
 
-  if (msg.includes("API key not valid") || msg.includes("API_KEY_INVALID")) {
+  if (
+    msg.includes("API key not valid") ||
+    msg.includes("API_KEY_INVALID") ||
+    msg.toLowerCase().includes("invalid api key") ||
+    msg.toLowerCase().includes("invalid_api_key")
+  ) {
     return "API key is invalid or unauthorized.";
   }
 
@@ -158,6 +188,102 @@ function getNvidiaError(error: any): { status: number; message: string } {
   return { status: status >= 400 && status < 600 ? status : 502, message: cleanErrorMessage(message) };
 }
 
+function getGeminiError(error: any): { status: number; message: string } {
+  const status = Number(error?.status) || 500;
+  const message = error?.message || (typeof error === "string" ? error : "Google Gemini API request failed.");
+  return { status: status >= 400 && status < 600 ? status : 500, message: cleanErrorMessage(message) };
+}
+
+function getGroqError(error: any): { status: number; message: string } {
+  const status = Number(error?.status) || Number(error?.response?.status) || 502;
+  const providerError = error?.error || error?.response?.data?.error || error?.response?.data;
+  const message = typeof providerError === "string"
+    ? providerError
+    : providerError?.message || error?.message || "Groq API request failed.";
+  return { status: status >= 400 && status < 600 ? status : 502, message: cleanErrorMessage(message) };
+}
+
+function resolveProvider(reqBody: any): { provider: "gemini" | "nvidia" | "groq"; model: string } {
+  const rawModel = (typeof reqBody?.modelIdentifier === "string" ? reqBody.modelIdentifier.trim() : "");
+  const modelIdentifier = rawModel === "auto" ? "" : rawModel;
+  const requestedProvider = (typeof reqBody?.provider === "string" ? reqBody.provider.trim().toLowerCase() : "");
+
+  const nvidiaKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
+  const groqKey = (process.env.GROQ_API_KEY || "").trim();
+  const isNvidia = Boolean(nvidiaKey && nvidiaKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  const isGemini = Boolean(geminiKey && !geminiKey.includes("YOUR_") && !geminiKey.includes("MY_"));
+  const isGroq = Boolean(groqKey && !groqKey.includes("YOUR_"));
+
+  // 1. Determine active server provider configured in .env
+  const envProv = (AI_PROVIDER as any) === "groq" ? "groq" : ((AI_PROVIDER as any) === "nvidia" ? "nvidia" : "gemini");
+
+  let provider: "gemini" | "nvidia" | "groq";
+
+  // 2. If client explicitly passed a provider parameter ("groq" | "nvidia" | "gemini")
+  if (requestedProvider === "groq" && isGroq) {
+    provider = "groq";
+  } else if (requestedProvider === "nvidia" && isNvidia) {
+    provider = "nvidia";
+  } else if (requestedProvider === "gemini" && isGemini) {
+    provider = "gemini";
+  } else if (!modelIdentifier) {
+    // No model specified or "auto": always follow .env AI_PROVIDER
+    if (envProv === "groq" && isGroq) provider = "groq";
+    else if (envProv === "nvidia" && isNvidia) provider = "nvidia";
+    else if (envProv === "gemini" && isGemini) provider = "gemini";
+    else if (isGroq) provider = "groq";
+    else if (isNvidia) provider = "nvidia";
+    else if (isGemini) provider = "gemini";
+    else provider = envProv;
+  } else {
+    // 3. Client sent a modelIdentifier.
+    // If model matches envProv, use envProv.
+    // If the server has a configured envProv, prioritize the server's AI_PROVIDER over stale browser caches!
+    const m = modelIdentifier.toLowerCase();
+    const isModelGemini = m.includes("gemini");
+    const isModelGroq = m.includes("groq") || m.includes("qwen") || m.includes("gpt-oss") || m.includes("llama-3.3") || m.includes("llama-3.1");
+    const isModelNvidia = m.includes("meta") || m.includes("llama-3.2") || m.includes("muse");
+
+    if (envProv === "groq" && isModelGroq && isGroq) {
+      provider = "groq";
+    } else if (envProv === "nvidia" && isModelNvidia && isNvidia) {
+      provider = "nvidia";
+    } else if (envProv === "gemini" && isModelGemini && isGemini) {
+      provider = "gemini";
+    } else if (envProv === "groq" && isGroq) {
+      provider = "groq";
+    } else if (envProv === "nvidia" && isNvidia) {
+      provider = "nvidia";
+    } else if (envProv === "gemini" && isGemini) {
+      provider = "gemini";
+    } else if (isModelGroq && isGroq) {
+      provider = "groq";
+    } else if (isModelNvidia && isNvidia) {
+      provider = "nvidia";
+    } else if (isModelGemini && isGemini) {
+      provider = "gemini";
+    } else {
+      provider = envProv;
+    }
+  }
+
+  // 4. Resolve Model:
+  let model = modelIdentifier;
+  const isTargetMatchingProvider =
+    (provider === "gemini" && model.toLowerCase().includes("gemini")) ||
+    (provider === "groq" && (model.toLowerCase().includes("groq") || model.toLowerCase().includes("qwen") || model.toLowerCase().includes("gpt-oss") || model.toLowerCase().includes("llama-3.3") || model.toLowerCase().includes("llama-3.1"))) ||
+    (provider === "nvidia" && (model.toLowerCase().includes("meta") || model.toLowerCase().includes("llama-3.2") || model.toLowerCase().includes("muse")));
+
+  if (!model || !isTargetMatchingProvider) {
+    if (provider === "groq") model = GROQ_MODEL;
+    else if (provider === "gemini") model = GEMINI_MODEL;
+    else model = NVIDIA_MODEL;
+  }
+
+  return { provider, model };
+}
+
 interface InputMessage {
   role: string;
   content?: string;
@@ -165,17 +291,51 @@ interface InputMessage {
   isError?: boolean;
 }
 
-function toNvidiaMessages(contents: Array<{ role: "user" | "model"; parts: any[] }>, systemInstruction: string) {
+function toOpenAIMessages(
+  contents: Array<{ role: "user" | "model"; parts: any[] }>,
+  systemInstruction: string,
+  supportsVision: boolean = true
+) {
   return [
     { role: "system", content: systemInstruction },
-    ...contents.map((content) => ({
-      role: content.role === "model" ? "assistant" : "user",
-      content: content.parts.map((part: any) => part.text
-        ? { type: "text", text: part.text }
-        : { type: "image_url", image_url: { url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}` } }),
-    })),
+    ...contents.map((content) => {
+      if (!supportsVision) {
+        const textParts = content.parts
+          .map((p: any) => p.text || (p.inlineData ? "[Attached Image]" : ""))
+          .filter(Boolean)
+          .join("\n\n");
+        return {
+          role: content.role === "model" ? "assistant" : "user",
+          content: textParts || "...",
+        };
+      }
+
+      const parts = content.parts
+        .map((part: any) => {
+          if (part.text) {
+            return { type: "text" as const, text: part.text };
+          }
+          if (part.inlineData?.data) {
+            return {
+              type: "image_url" as const,
+              image_url: {
+                url: `data:${part.inlineData.mimeType || "image/jpeg"};base64,${part.inlineData.data}`,
+              },
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
+
+      return {
+        role: content.role === "model" ? "assistant" : "user",
+        content: parts.length > 0 ? parts : [{ type: "text" as const, text: "..." }],
+      };
+    }),
   ] as OpenAI.Chat.Completions.ChatCompletionMessageParam[];
 }
+
+const toNvidiaMessages = toOpenAIMessages;
 
 /**
  * Formats and validates the message history for the NVIDIA API:
@@ -285,7 +445,29 @@ function formatContentsForNvidia(messages: InputMessage[]) {
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", name: "Vishwamedha AI", ready: !!process.env.NVIDIA_API_KEY });
+  const nvidiaKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
+  const groqKey = (process.env.GROQ_API_KEY || "").trim();
+  const isNvidiaConfigured = Boolean(nvidiaKey && nvidiaKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  const isGeminiConfigured = Boolean(geminiKey && !geminiKey.includes("YOUR_") && !geminiKey.includes("MY_"));
+  const isGroqConfigured = Boolean(groqKey && !groqKey.includes("YOUR_"));
+
+  let activeModel = NVIDIA_MODEL;
+  if (AI_PROVIDER === "gemini") activeModel = GEMINI_MODEL;
+  else if (AI_PROVIDER === "groq") activeModel = GROQ_MODEL;
+
+  res.json({
+    status: "ok",
+    name: "Vishwamedha AI",
+    activeProvider: AI_PROVIDER,
+    activeModel,
+    configuredProviders: {
+      nvidia: isNvidiaConfigured,
+      gemini: isGeminiConfigured,
+      groq: isGroqConfigured,
+    },
+    ready: isNvidiaConfigured || isGeminiConfigured || isGroqConfigured,
+  });
 });
 
 // NVIDIA OpenAI-compatible chat endpoint
@@ -467,43 +649,51 @@ app.post("/api/user/sessions", (req, res) => {
   res.json({ success: true, count: sessions.length });
 });
 
-// Fast NVIDIA chat completion endpoint with SSE streaming and multimodal images.
+// Fast chat completion endpoint with SSE streaming and multimodal images.
 app.post("/api/chat/stream", async (req, res) => {
   const routeStart = Date.now();
-  const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
-  const apiKeyRead = Boolean(apiKey && apiKey !== "YOUR_NVIDIA_API_KEY_HERE");
-  console.log(`[NVIDIA_STREAM] request-start`, {
+  const { provider, model } = resolveProvider(req.body);
+
+  const nvidiaKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
+  const groqKey = (process.env.GROQ_API_KEY || "").trim();
+  const isNvidiaConfigured = Boolean(nvidiaKey && nvidiaKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  const isGeminiConfigured = Boolean(geminiKey && !geminiKey.includes("YOUR_") && !geminiKey.includes("MY_"));
+  const isGroqConfigured = Boolean(groqKey && !groqKey.includes("YOUR_"));
+
+  console.log(`[STREAM] request-start`, {
     route: "/api/chat/stream",
-    vercel: process.env.VERCEL || "undefined",
-    vercelEnv: process.env.VERCEL_ENV || "undefined",
-    nodeEnv: process.env.NODE_ENV || "undefined",
-    nvidiaModel: NVIDIA_MODEL,
-    nvidiaApiKeyConfigured: apiKeyRead,
-    nvidiaApiKeyLength: apiKey.length,
+    provider,
+    model,
+    isGeminiConfigured,
+    isGroqConfigured,
+    isNvidiaConfigured,
     messageCount: Array.isArray(req.body?.messages) ? req.body.messages.length : 0,
   });
 
   try {
-    const { messages, studentGrade, subjectFocus } = req.body;
-
-    if (!apiKey || apiKey === "YOUR_NVIDIA_API_KEY_HERE") {
-      console.error(`[NVIDIA_STREAM] missing-key`, {
-        vercel: process.env.VERCEL || "undefined",
-        nodeEnv: process.env.NODE_ENV || "undefined",
-        nvidiaModel: NVIDIA_MODEL,
-        apiKeyConfigured: false,
-      });
+    if (provider === "gemini" && !isGeminiConfigured) {
       return res.status(500).json({
-        error: "NVIDIA_API_KEY is not configured in your server environment."
+        error: "GEMINI_API_KEY is not configured in your server environment. Please set your Google AI Studio API key in .env.",
+      });
+    }
+    if (provider === "groq" && !isGroqConfigured) {
+      return res.status(500).json({
+        error: "GROQ_API_KEY is not configured in your server environment. Please set your Groq API key in .env.",
+      });
+    }
+    if (provider === "nvidia" && !isNvidiaConfigured) {
+      return res.status(500).json({
+        error: "NVIDIA_API_KEY is not configured in your server environment.",
       });
     }
 
+    const { messages, studentGrade, subjectFocus } = req.body;
+
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      console.warn(`[NVIDIA_STREAM] invalid-messages`, { messageCount: Array.isArray(messages) ? messages.length : 0 });
       return res.status(400).json({ error: "Messages array is required." });
     }
 
-    // Prepare system instructions with dynamic temporal context and student mode context if provided
     const currentDateStr = new Date().toLocaleDateString("en-US", {
       weekday: "long",
       year: "numeric",
@@ -511,7 +701,6 @@ app.post("/api/chat/stream", async (req, res) => {
       day: "numeric",
     });
 
-    // Fetch live exchange rates to keep financial data current
     const liveRates = await getLiveExchangeRates();
     const inrRate  = liveRates["INR"]  ? liveRates["INR"].toFixed(2)  : "N/A";
     const eurRate  = liveRates["EUR"]  ? liveRates["EUR"].toFixed(4)  : "N/A";
@@ -545,70 +734,149 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       systemInstruction += `\n- Current Subject Focus: ${subjectFocus}. Apply specialized pedagogical rigor for ${subjectFocus}.`;
     }
 
-    // Format messages safely and efficiently for NVIDIA API
     const formattedContents = formatContentsForNvidia(messages);
 
     if (formattedContents.length === 0) {
       return res.status(400).json({ error: "No valid user message content found." });
     }
 
-    // Track if client closed the connection prematurely
     let isClientClosed = false;
     req.on("close", () => {
       isClientClosed = true;
     });
 
-    // Set up SSE headers with immediate flush
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
 
-    console.log(`[NVIDIA_STREAM] provider-call-start`, {
-      model: NVIDIA_MODEL,
-      messageCount: formattedContents.length,
-      firstRole: formattedContents[0]?.role,
-      routeMs: Date.now() - routeStart,
-    });
+    if (provider === "gemini") {
+      console.log(`[GEMINI_STREAM] provider-call-start`, {
+        model,
+        messageCount: formattedContents.length,
+        routeMs: Date.now() - routeStart,
+      });
 
-    const stream = await getNvidiaClient().chat.completions.create({
-      model: NVIDIA_MODEL,
-      messages: toNvidiaMessages(formattedContents, systemInstruction),
-      temperature: 0.95,
-      top_p: 1,
-      max_tokens: 8192,
-      stream: true,
-    });
+      const stream = await getGeminiClient().models.generateContentStream({
+        model,
+        contents: formattedContents as any,
+        config: {
+          systemInstruction,
+        },
+      });
 
-    for await (const chunk of stream) {
-      if (isClientClosed) break;
-      const chunkText = chunk.choices[0]?.delta?.content || "";
-      if (chunkText) {
-        res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
-        if (typeof (res as any).flush === "function") {
-          (res as any).flush();
+      for await (const chunk of stream) {
+        if (isClientClosed) break;
+        let chunkText = "";
+        try {
+          chunkText = chunk.text || chunk.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
+        } catch {
+          chunkText = chunk.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
+        }
+        if (chunkText) {
+          res.write(`data: ${JSON.stringify({ text: chunkText, provider: "gemini", model })}\n\n`);
+          if (typeof (res as any).flush === "function") {
+            (res as any).flush();
+          }
         }
       }
-    }
 
-    if (!isClientClosed) {
-      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-      res.end();
+      if (!isClientClosed) {
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+        res.end();
+      }
+      const elapsedMs = Date.now() - routeStart;
+      console.log(`[GEMINI_STREAM] provider-call-complete`, {
+        elapsedMs,
+        model,
+      });
+      console.log(`[Chat Reply Stream] [Gemini - ${model}] Stream completed in ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
+    } else if (provider === "groq") {
+      console.log(`[GROQ_STREAM] provider-call-start`, {
+        model,
+        messageCount: formattedContents.length,
+        routeMs: Date.now() - routeStart,
+      });
+
+      const isVisionModel = model.toLowerCase().includes("vision");
+      const stream = await getGroqClient().chat.completions.create({
+        model,
+        messages: toOpenAIMessages(formattedContents, systemInstruction, isVisionModel),
+        temperature: 0.7,
+        max_tokens: 8192,
+        stream: true,
+      });
+
+      for await (const chunk of stream) {
+        if (isClientClosed) break;
+        const chunkText = chunk.choices[0]?.delta?.content || "";
+        if (chunkText) {
+          res.write(`data: ${JSON.stringify({ text: chunkText, provider: "groq", model })}\n\n`);
+          if (typeof (res as any).flush === "function") {
+            (res as any).flush();
+          }
+        }
+      }
+
+      if (!isClientClosed) {
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+        res.end();
+      }
+      const elapsedMs = Date.now() - routeStart;
+      console.log(`[GROQ_STREAM] provider-call-complete`, {
+        elapsedMs,
+        model,
+      });
+      console.log(`[Chat Reply Stream] [Groq - ${model}] Stream completed in ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
+    } else {
+      console.log(`[NVIDIA_STREAM] provider-call-start`, {
+        model,
+        messageCount: formattedContents.length,
+        firstRole: formattedContents[0]?.role,
+        routeMs: Date.now() - routeStart,
+      });
+
+      const stream = await getNvidiaClient().chat.completions.create({
+        model,
+        messages: toNvidiaMessages(formattedContents, systemInstruction),
+        temperature: 0.95,
+        top_p: 1,
+        max_tokens: 8192,
+        stream: true,
+      });
+
+      for await (const chunk of stream) {
+        if (isClientClosed) break;
+        const chunkText = chunk.choices[0]?.delta?.content || "";
+        if (chunkText) {
+          res.write(`data: ${JSON.stringify({ text: chunkText, provider: "nvidia", model })}\n\n`);
+          if (typeof (res as any).flush === "function") {
+            (res as any).flush();
+          }
+        }
+      }
+
+      if (!isClientClosed) {
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+        res.end();
+      }
+      const elapsedMs = Date.now() - routeStart;
+      console.log(`[NVIDIA_STREAM] provider-call-complete`, {
+        elapsedMs,
+        model,
+        backend: process.env.VERCEL === "1" ? "vercel" : "local",
+      });
+      console.log(`[Chat Reply Stream] [NVIDIA - ${model}] Stream completed in ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
     }
-    console.log(`[NVIDIA_STREAM] provider-call-complete`, {
-      elapsedMs: Date.now() - routeStart,
-      model: NVIDIA_MODEL,
-      backend: process.env.VERCEL === "1" ? "vercel" : "local",
-    });
   } catch (error: any) {
-    const providerError = getNvidiaError(error);
-    console.error(`[NVIDIA_STREAM] provider-error`, {
+    const prov = resolveProvider(req.body).provider;
+    const providerError = prov === "gemini" ? getGeminiError(error) : (prov === "groq" ? getGroqError(error) : getNvidiaError(error));
+    console.error(`[STREAM_ERROR]`, {
       status: providerError.status,
       message: providerError.message,
-      vercel: process.env.VERCEL || "undefined",
-      nodeEnv: process.env.NODE_ENV || "undefined",
-      model: NVIDIA_MODEL,
+      provider: prov,
+      model,
       elapsedMs: Date.now() - routeStart,
       stack: error?.stack,
     });
@@ -621,36 +889,54 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
   }
 });
 
-// Non-streaming chat endpoint (fallback with model candidate resilience)
+// Non-streaming chat endpoint (supports Google Gemini, Groq, and NVIDIA)
 app.post("/api/chat", async (req, res) => {
   const routeStart = Date.now();
-  const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
-  const apiKeyRead = Boolean(apiKey && apiKey !== "YOUR_NVIDIA_API_KEY_HERE");
-  console.log(`[NVIDIA_JSON] request-start`, {
+  const { provider, model } = resolveProvider(req.body);
+
+  const nvidiaKey = (process.env.NVIDIA_API_KEY || "").trim();
+  const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
+  const groqKey = (process.env.GROQ_API_KEY || "").trim();
+  const isNvidiaConfigured = Boolean(nvidiaKey && nvidiaKey !== "YOUR_NVIDIA_API_KEY_HERE");
+  const isGeminiConfigured = Boolean(geminiKey && !geminiKey.includes("YOUR_") && !geminiKey.includes("MY_"));
+  const isGroqConfigured = Boolean(groqKey && !groqKey.includes("YOUR_"));
+
+  console.log(`[CHAT_JSON] request-start`, {
     route: "/api/chat",
-    vercel: process.env.VERCEL || "undefined",
-    vercelEnv: process.env.VERCEL_ENV || "undefined",
-    nodeEnv: process.env.NODE_ENV || "undefined",
-    nvidiaModel: NVIDIA_MODEL,
-    nvidiaApiKeyConfigured: apiKeyRead,
-    nvidiaApiKeyLength: apiKey.length,
+    provider,
+    model,
+    isGeminiConfigured,
+    isGroqConfigured,
+    isNvidiaConfigured,
     messageCount: Array.isArray(req.body?.messages) ? req.body.messages.length : 0,
   });
 
   try {
+    if (provider === "gemini" && !isGeminiConfigured) {
+      console.error(`[GEMINI_JSON] missing-key`, { route: "/api/chat", elapsedMs: Date.now() - routeStart });
+      return res.status(500).json({
+        error: "GEMINI_API_KEY is not configured in your .env file. Please set your Google AI Studio API key (GEMINI_API_KEY) in .env to test Gemini.",
+      });
+    }
+
+    if (provider === "groq" && !isGroqConfigured) {
+      console.error(`[GROQ_JSON] missing-key`, { route: "/api/chat", elapsedMs: Date.now() - routeStart });
+      return res.status(500).json({
+        error: "GROQ_API_KEY is not configured in your .env file. Please set your Groq API key (GROQ_API_KEY) in .env to test Groq.",
+      });
+    }
+
+    if (provider === "nvidia" && !isNvidiaConfigured) {
+      console.error(`[NVIDIA_JSON] missing-key`, { route: "/api/chat", elapsedMs: Date.now() - routeStart });
+      return res.status(500).json({
+        error: "NVIDIA_API_KEY is not configured in your server environment.",
+      });
+    }
+
     const { messages, studentGrade, subjectFocus } = req.body;
 
-    if (!apiKey || apiKey === "YOUR_NVIDIA_API_KEY_HERE") {
-      console.error(`[NVIDIA_JSON] missing-key`, {
-        route: "/api/chat",
-        vercel: process.env.VERCEL || "undefined",
-        vercelEnv: process.env.VERCEL_ENV || "undefined",
-        nodeEnv: process.env.NODE_ENV || "undefined",
-        nvidiaModel: NVIDIA_MODEL,
-        apiKeyConfigured: false,
-        elapsedMs: Date.now() - routeStart,
-      });
-      return res.status(500).json({ error: "NVIDIA_API_KEY is not configured in your server environment." });
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "Messages array is required." });
     }
 
     const currentDateStr = new Date().toLocaleDateString("en-US", {
@@ -660,7 +946,6 @@ app.post("/api/chat", async (req, res) => {
       day: "numeric",
     });
 
-    // Fetch live exchange rates to keep financial data current
     const liveRates = await getLiveExchangeRates();
     const inrRate  = liveRates["INR"]  ? liveRates["INR"].toFixed(2)  : "N/A";
     const eurRate  = liveRates["EUR"]  ? liveRates["EUR"].toFixed(4)  : "N/A";
@@ -700,46 +985,119 @@ ${VISHWAMEDHA_SYSTEM_INSTRUCTION}`;
       return res.status(400).json({ error: "No valid user message content found." });
     }
 
-    console.log(`[NVIDIA_JSON] provider-call-start`, {
-      route: "/api/chat",
-      vercel: process.env.VERCEL || "undefined",
-      vercelEnv: process.env.VERCEL_ENV || "undefined",
-      nodeEnv: process.env.NODE_ENV || "undefined",
-      model: NVIDIA_MODEL,
-      messageCount: formattedContents.length,
-      elapsedMs: Date.now() - routeStart,
-    });
+    if (provider === "gemini") {
+      console.log(`[GEMINI_JSON] provider-call-start`, {
+        route: "/api/chat",
+        model,
+        messageCount: formattedContents.length,
+        elapsedMs: Date.now() - routeStart,
+      });
 
-    const completion = await getNvidiaClient().chat.completions.create({
-      model: NVIDIA_MODEL,
-      messages: toNvidiaMessages(formattedContents, systemInstruction),
-      temperature: 0.95,
-      top_p: 1,
-      max_tokens: 8192,
-      stream: false,
-    });
+      const geminiClient = getGeminiClient();
+      const response = await geminiClient.models.generateContent({
+        model,
+        contents: formattedContents as any,
+        config: {
+          systemInstruction,
+        },
+      });
 
-    console.log(`[NVIDIA_JSON] provider-call-complete`, {
-      route: "/api/chat",
-      vercel: process.env.VERCEL || "undefined",
-      vercelEnv: process.env.VERCEL_ENV || "undefined",
-      nodeEnv: process.env.NODE_ENV || "undefined",
-      model: NVIDIA_MODEL,
-      elapsedMs: Date.now() - routeStart,
-      responseLength: completion.choices?.[0]?.message?.content?.length || 0,
-    });
+      let responseText = response.text || "";
+      if (!responseText && response.candidates?.[0]?.content?.parts) {
+        responseText = response.candidates[0].content.parts.map((p: any) => p.text || "").join("");
+      }
+      const elapsedMs = Date.now() - routeStart;
+      console.log(`[GEMINI_JSON] provider-call-complete`, {
+        route: "/api/chat",
+        model,
+        elapsedMs,
+        responseLength: responseText.length,
+      });
+      console.log(`[Chat Reply] [Gemini: ${model}] Total time to generate reply: ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
 
-    res.json({ text: completion.choices[0]?.message?.content || "" });
+      return res.json({ text: responseText, provider: "gemini", model });
+    } else if (provider === "groq") {
+      console.log(`[GROQ_JSON] provider-call-start`, {
+        route: "/api/chat",
+        model,
+        messageCount: formattedContents.length,
+        elapsedMs: Date.now() - routeStart,
+      });
+
+      const isVisionModel = model.toLowerCase().includes("vision");
+      let responseText = "";
+      try {
+        const completion = await getGroqClient().chat.completions.create({
+          model,
+          messages: toOpenAIMessages(formattedContents, systemInstruction, isVisionModel),
+          temperature: 0.7,
+          max_tokens: 8192,
+          stream: false,
+        });
+        responseText = completion.choices[0]?.message?.content || "";
+      } catch (chatErr: any) {
+        if (typeof (getGroqClient().responses as any)?.create === "function") {
+          const lastMsg = formattedContents[formattedContents.length - 1];
+          const inputText = lastMsg?.parts?.map((p: any) => p.text || "").join("\n") || "";
+          const resp = await (getGroqClient().responses as any).create({
+            model,
+            input: inputText,
+            instructions: systemInstruction,
+          });
+          responseText = resp.output_text || resp.output?.[0]?.content?.[0]?.text || "";
+        } else {
+          throw chatErr;
+        }
+      }
+
+      const elapsedMs = Date.now() - routeStart;
+      console.log(`[GROQ_JSON] provider-call-complete`, {
+        route: "/api/chat",
+        model,
+        elapsedMs,
+        responseLength: responseText.length,
+      });
+      console.log(`[Chat Reply] [Groq: ${model}] Total time to generate reply: ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
+
+      return res.json({ text: responseText, provider: "groq", model });
+    } else {
+      console.log(`[NVIDIA_JSON] provider-call-start`, {
+        route: "/api/chat",
+        model,
+        messageCount: formattedContents.length,
+        elapsedMs: Date.now() - routeStart,
+      });
+
+      const completion = await getNvidiaClient().chat.completions.create({
+        model,
+        messages: toNvidiaMessages(formattedContents, systemInstruction),
+        temperature: 0.95,
+        top_p: 1,
+        max_tokens: 8192,
+        stream: false,
+      });
+
+      const responseText = completion.choices[0]?.message?.content || "";
+      const elapsedMs = Date.now() - routeStart;
+      console.log(`[NVIDIA_JSON] provider-call-complete`, {
+        route: "/api/chat",
+        model,
+        elapsedMs,
+        responseLength: responseText.length,
+      });
+      console.log(`[Chat Reply] [NVIDIA: ${model}] Total time to generate reply: ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
+
+      return res.json({ text: responseText, provider: "nvidia", model });
+    }
   } catch (error: any) {
-    const providerError = getNvidiaError(error);
-    console.error(`[NVIDIA_JSON] provider-error`, {
+    const prov = resolveProvider(req.body).provider;
+    const providerError = prov === "gemini" ? getGeminiError(error) : (prov === "groq" ? getGroqError(error) : getNvidiaError(error));
+    console.error(`[CHAT_ERROR]`, {
       route: "/api/chat",
       status: providerError.status,
       message: providerError.message,
-      vercel: process.env.VERCEL || "undefined",
-      vercelEnv: process.env.VERCEL_ENV || "undefined",
-      nodeEnv: process.env.NODE_ENV || "undefined",
-      model: NVIDIA_MODEL,
+      provider: prov,
+      model,
       elapsedMs: Date.now() - routeStart,
       stack: error?.stack,
     });

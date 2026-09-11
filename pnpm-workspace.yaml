@@ -1,6 +1,8 @@
 allowBuilds:
+  '@google/genai': set this to true or false
   '@prisma/engines': false
   esbuild: false
   msgpackr-extract: false
   prisma: false
+  protobufjs: set this to true or false
   workerd: false

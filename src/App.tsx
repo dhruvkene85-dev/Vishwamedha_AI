@@ -47,7 +47,13 @@ export default function App() {
   const [appSettings, setAppSettings] = useState<AppSettings>(() => {
     try {
       const saved = localStorage.getItem(APP_SETTINGS_KEY);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.modelIdentifier === 'meta/llama-3.2-11b-vision-instruct') {
+          parsed.modelIdentifier = 'gemini-2.0-flash';
+        }
+        return parsed;
+      }
     } catch (e) {
       console.error('Failed to load app settings:', e);
     }
@@ -57,7 +63,7 @@ export default function App() {
       responseStyle: 'step_by_step',
       speechRate: 1.0,
       autoScroll: true,
-      modelIdentifier: 'meta/llama-3.2-11b-vision-instruct',
+      modelIdentifier: 'gemini-2.0-flash',
     };
   });
 
@@ -152,6 +158,42 @@ export default function App() {
       console.error('Failed to save settings:', e);
     }
   }, [appSettings]);
+
+  // Sync active AI provider and model from server environment
+  useEffect(() => {
+    fetch('/api/health')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && data.activeModel) {
+          const lastServerProvider = localStorage.getItem('vishwamedha_last_server_provider');
+          // If the server's AI_PROVIDER changed in .env (e.g. nvidia -> groq), immediately sync model
+          if (lastServerProvider !== data.activeProvider) {
+            localStorage.setItem('vishwamedha_last_server_provider', data.activeProvider);
+            setAppSettings((prev) => ({ ...prev, modelIdentifier: data.activeModel }));
+            return;
+          }
+
+          setAppSettings((prev) => {
+            const currentModel = prev.modelIdentifier || '';
+            const isGemini = currentModel.toLowerCase().includes('gemini');
+            const isGroq = currentModel.toLowerCase().includes('groq') || currentModel.toLowerCase().includes('qwen') || currentModel.toLowerCase().includes('gpt-oss');
+            const isNvidia = currentModel.toLowerCase().includes('meta') || currentModel.toLowerCase().includes('llama') || currentModel.toLowerCase().includes('muse');
+
+            const isCurrentConfigured =
+              (isGemini && data.configuredProviders?.gemini) ||
+              (isGroq && data.configuredProviders?.groq) ||
+              (isNvidia && data.configuredProviders?.nvidia);
+
+            // Automatically switch if the selected model has no API key configured on the server
+            if (!isCurrentConfigured || !currentModel) {
+              return { ...prev, modelIdentifier: data.activeModel };
+            }
+            return prev;
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Auto-scroll when messages change or stream
   useEffect(() => {
@@ -406,6 +448,8 @@ export default function App() {
       images: m.images ? m.images.map(img => ({ mimeType: img.mimeType, data: img.data })) : undefined,
     }));
 
+    const startTime = performance.now();
+
     try {
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
@@ -417,6 +461,7 @@ export default function App() {
           messages: historyPayload,
           studentGrade: targetSession.studentGrade || userProfile.studentGrade || appSettings.defaultGrade,
           subjectFocus: targetSession.subjectFocus || userProfile.preferredSubject || appSettings.defaultSubject,
+          modelIdentifier: appSettings.modelIdentifier || undefined,
         }),
         signal: abortController.signal,
       });
@@ -434,6 +479,10 @@ export default function App() {
 
       const data = await response.json();
       if (data.error) throw new Error(data.error);
+
+      const elapsedMs = Math.round(performance.now() - startTime);
+      const providerTag = data.provider ? ` [${data.provider}: ${data.model || 'model'}]` : '';
+      console.log(`[Chat Reply]${providerTag} Response received in ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s)`);
 
       const accumulatedText = data.text || data.content || '';
       setSessions((prev) =>
@@ -455,11 +504,12 @@ export default function App() {
         })
       );
     } catch (err: any) {
+      const elapsedMs = Math.round(performance.now() - startTime);
       if (err.name === 'AbortError') {
-        console.log('Generation aborted by user.');
+        console.log(`[Chat Reply] Generation aborted by user after ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s).`);
         return;
       }
-      console.error('Chat error:', err);
+      console.error(`[Chat Reply] Error after ${elapsedMs}ms (${(elapsedMs / 1000).toFixed(2)}s):`, err);
       let errorMessage = err.message || 'Failed to get a response from Vishwamedha AI. Please check your connection or retry.';
       
       try {
@@ -512,7 +562,7 @@ export default function App() {
           if (s.id !== activeSession.id) return s;
           return {
             ...s,
-            messages: s.messages.filter((m) => !m.isError),
+            messages: s.messages.filter((m) => !m.isError && m.id !== lastUserMessage.id),
           };
         })
       );
